@@ -83,7 +83,7 @@ Legend: **Verified** = implemented + evidence in §11.
 | R13 | Optimistic UI | instant "Reserving…/Securing your unit…" | lib.test | **Verified** |
 | R14 | Asset pre-fetching / CDN-ready assets | `<link rel=preload>` for first API calls, idle route-chunk prefetch, hashed immutable assets, precompressed `.br/.gz` | browser resource timing; `curl` shows `content-encoding: br` | **Verified** (CDN itself not deployed) |
 | R15 | Bundle < 200 KB, TTI < 1.5 s | route code-splitting, lean shell, budget gate | 170 KB Brotli; localhost warm DOM-interactive 42 ms | **Verified** (no real-network TTI) |
-| R16 | Load balancing | `cluster.js` (verified); `infra/nginx.conf` (unverified) | load tests | Cluster **Verified**; NGINX *unverified* |
+| R16 | Load balancing | `cluster.js`; **NGINX 1.28 in front of 3 replicas** (`infra/nginx.local.conf`, `start-lb-demo.ps1`); per-replica stats (`plugins/traffic.js`, admin Traffic tab) | 10,000-user simulation: 8,250 / 8,402 / 8,213 requests per replica (§19) | **Verified (local NGINX)**; production `infra/nginx.conf` still unverified |
 | R17 | Auth & authorization | bcrypt + JWT, `requireAdmin`, ownership checks | auth.test, orders.test 404/403 | **Verified** |
 | R18 | Admin deals + consistency | `routes/admin.js`, `AdminPage.jsx` | deals.test admin; browser dashboard | **Verified** |
 | R19 | Validation + central errors | JSON schemas (`schemas/common.js`), `plugins/errors.js` | auth.test bad JSON/validation | **Verified** |
@@ -99,6 +99,7 @@ Legend: **Verified** = implemented + evidence in §11.
 | R29 | Admin fulfilment (ship/deliver) | `adminAdvanceStatus`, Orders tab | orders.test; browser | **Verified** |
 | R30 | Astryx UI, neutral with colour hints, responsive | `main.jsx`, `styles.css` | browser desktop + 375 px | **Verified** |
 | R31 | Backend review & modern stack recommendations | §18 | — | **Done** |
+| R32 | Simulate 10,000 real users through a load balancer | `scripts/simulate-users.js` (full shopper journey), Traffic dashboard | §19 run: 500 reserved, 453 paid, 47 held, 0 errors, all invariants pass | **Verified** |
 
 ## 4. System Architecture
 
@@ -161,9 +162,11 @@ E:\goMl
 ├─ package.json              npm workspaces + root scripts
 ├─ CLAUDE.md                 this file
 ├─ .claude/launch.json       browser-pane dev server config ("web" = Vite)
-├─ infra/nginx.conf          reference LB/edge config (unverified)
+├─ infra/nginx.conf          production reference LB/edge config (unverified)
+├─ infra/nginx.local.conf    local NGINX demo: :8088 → api-1..3 (least_conn, keepalive, micro-cache, limits)
+├─ infra/start-lb-demo.ps1   starts 3 API replicas + 2 workers + NGINX; stop-lb-demo.ps1 stops them
 ├─ backend/
-│  ├─ .env.example / .env (local, ignored) / .env.test / .env.loadtest
+│  ├─ .env.example / .env (local, ignored) / .env.test / .env.loadtest / .env.sim (LB demo, own DB)
 │  ├─ src/
 │  │  ├─ server.js, cluster.js, worker.js      process entry points
 │  │  ├─ app.js               buildApp(): Fastify, helmet, compress, /api plugins, static SPA (+ .br)
@@ -171,13 +174,14 @@ E:\goMl
 │  │  ├─ lib/                 errors, logger, mongo, redis (+ key builders)
 │  │  ├─ redis/scripts.js     Lua: RESERVE, RELEASE, PRIME, RATE_LIMIT
 │  │  ├─ models/              User (+addresses), Product (+variants), Deal, Order
-│  │  ├─ plugins/             guards.js (authenticate, requireAdmin, botGuard, rateLimit), errors.js
+│  │  ├─ plugins/             guards.js (authenticate, requireAdmin, botGuard, rateLimit), errors.js,
+│  │  │                       traffic.js (X-Served-By + per-replica req/s in Redis), fp.js
 │  │  ├─ schemas/common.js    shared JSON-schema fragments
 │  │  ├─ routes/              auth.js (+address book), catalog.js (+cart quote), deals.js, orders.js, admin.js
 │  │  └─ services/            authService, accountService, catalogService, cartService, dealService,
 │  │                          reservationService, orderService, paymentService (simulated), pricing,
 │  │                          orderProcessor (worker txn), orderWorker (stream mechanics)
-│  ├─ scripts/               init-replset, seed (+catalog-data), loadtest
+│  ├─ scripts/               init-replset, seed (+catalog-data), loadtest (raw burst), simulate-users (10k-shopper journey via NGINX)
 │  └─ test/                  helpers + auth, catalog, orders, deals, concurrency, integrity
 └─ frontend/
    ├─ index.html             preloads the first two API calls
@@ -324,6 +328,9 @@ Same tests on Express (session 1): 1,796–2,319 req/s, p99 232–458 ms → Fas
 | E14 | Mobile header items overlapping | TopNav without AppShell's mobile handling → compact header below 720 px |
 | E15 | "OnePlus OnePlus 13" | names that already include the brand → `productTitle()` |
 | E16 | Checkout would remount mid-payment | URL change to `/checkout/:id` changed the React key → keep key for orders created on the page |
+| E17 | NGINX `bind() to 0.0.0.0:8080 failed (10013)` | port 8080 already used by another program → demo listens on 127.0.0.1:8088 |
+| E18 | NGINX "1024 worker_connections are not enough"; simulator process died (0xC0000409) | Windows NGINX = 1 worker with select() (≤ 1,024 sockets, client + upstream) → simulator pool lowered from 800 to 400 sockets; run with `--report-on-fatalerror` |
+| E19 | Client-side per-replica split looked lopsided | cached/stale responses keep the original replica's `X-Served-By` → trust the server-side Traffic counters; the simulator labels `X-Cache: HIT` as nginx-cache |
 
 ## 13. Commands
 ```bash
@@ -353,6 +360,7 @@ Questions: (1) Why can't the deal oversell even if Redis is wrong? (2) What stop
 
 ## 17. Change Log
 **Session 1 (2026-10-28)** — MERN flash-sale checkout (Express), Redis Lua + Streams, tests, load tests (see git `5dd1b7b`).
+**Session 3 (2026-10-28)** — Real NGINX (1.28 Windows build in `E:\tools`) in front of 3 API replicas + 2 workers; replica identity (`REPLICA_ID`, `X-Served-By`), per-replica traffic counters and admin **Traffic** tab; `simulate-users.js` (10,000 accounts walking the real journey). Fixes E17–E19. Result in §19.
 **Session 2 (2026-10-28)** — Full storefront redesign: Fastify migration; Product/Deal/Order/User models redesigned; catalog (10 phones), cart quote, cart orders with transactional stock holds, simulated payments with idempotency, cancellation/refund, hold-expiry sweeper, address book, admin fulfilment; React 19 + Astryx neutral UI (12 screens), route splitting, precompressed assets; 44 tests; load tests ≈2× Express; browser E2E. Fixes E9–E16. Decisions A5, A10–A13.
 
 ## 18. Backend Review & Recommendations
@@ -373,3 +381,53 @@ What changed now and what to adopt next, ordered by impact for *this* workload.
 8. **Security hardening:** httpOnly SameSite cookies with short-lived access + rotating refresh tokens; Cloudflare Turnstile / CAPTCHA on reserve; WAF bot rules; Mongo/Redis auth + TLS + network isolation.
 9. **Runtime options:** Node 24 LTS is the safe default. Bun or uWebSockets.js can raise raw HTTP throughput further, but the bottleneck here is Redis/Mongo round-trips and the network, not the HTTP framework — measure before switching.
 10. **Data:** MongoDB Atlas Search for the catalog when it grows; a separate inventory service if regular SKUs ever see deal-like contention (then use the Redis gate for them too).
+
+## 19. Load Balancer and the 10,000-User Simulation
+
+### What runs
+```
+10,000 simulated shoppers (scripts/simulate-users.js, 400 keep-alive sockets)
+        │  every request: X-Forwarded-For = that shopper's own IP
+        ▼
+NGINX :8088  ── serves the built storefront (gzip_static), caches GET /api/deals/:id for 1 s,
+        │        rate-limits per client, blocks bot user-agents, picks a replica (least_conn)
+        ├──▶ api-1 :4001 ┐
+        ├──▶ api-2 :4002 ├──▶ Redis (deal tokens, queue, rate limits, stats)  +  MongoDB rs0
+        └──▶ api-3 :4003 ┘                    ▲
+                         worker-1, worker-2 ───┘ (one Redis Streams consumer group → each job once)
+```
+Start / simulate / stop (MongoDB + Redis running, `npm run build` done):
+```bash
+powershell -ExecutionPolicy Bypass -File infra/start-lb-demo.ps1
+```
+```bash
+cd backend && node --env-file=.env --env-file=.env.sim scripts/simulate-users.js --users=10000 --stock=500 --starts-in-sec=30
+```
+```bash
+powershell -ExecutionPolicy Bypass -File infra/stop-lb-demo.ps1
+```
+Watch live: http://127.0.0.1:8088/admin → **Traffic** (requests/s per replica) and **Flash deals** (Redis vs Mongo counters). Log in with the admin account from `backend/.env` (the simulator creates it in the sim database).
+
+### How to explain the backend on a load balancer (talk track)
+1. **One address, many servers.** Shoppers only know `:8088`. NGINX holds a pool (`upstream api`) of identical API replicas and forwards each request to one of them. More capacity = one more line (or container) — no code change.
+2. **Why any replica can serve any request — statelessness.** Replicas keep nothing about a user in memory: identity is a signed JWT verified locally, and everything shared lives in Redis/MongoDB. Request 1 can go to api-1 and request 2 to api-3 without the session breaking — no sticky sessions.
+3. **How NGINX picks.** `least_conn`: the next request goes to the replica with the fewest requests in flight, so a slow replica automatically receives less work. In the run: 8,250 / 8,402 / 8,213 requests — a 33 / 34 / 33 % split.
+4. **Still ONE source of truth.** Three replicas would oversell if each kept its own stock counter. Instead all of them call the same Redis Lua script; Redis runs one script at a time, so across all replicas the 501st buyer is always told "sold out". The workers' conditional decrement in MongoDB is the second safety net.
+5. **What the balancer adds.** (a) **Micro-cache:** the deal status everyone polls is cached for 1 s — 74,200 of 75,699 status polls never reached a replica; during the countdown the replicas saw about one request every 2 s while 10,000 users watched. (b) **Edge rate limits and bot blocking** before Node is touched. (c) **Keep-alive pool** to the replicas (no TCP handshake per request). (d) **Failover:** `max_fails` / `proxy_next_upstream` retry a GET on another replica if one dies; POSTs are not retried (and reserve/pay are idempotent anyway).
+6. **Real client IP behind a proxy.** NGINX appends the client address to `X-Forwarded-For`; the API trusts that header only from addresses listed in `TRUST_PROXY` (here `loopback`), so per-user limits still work and clients cannot spoof their IP.
+7. **Background work scales separately.** Two workers share the queue through a consumer group (each job delivered once; a crashed worker's jobs are reclaimed). The expiry sweeper is safe to run in both because every release is a conditional update.
+8. **Proof, not claims.** Every response carries `X-Served-By`; each replica reports its per-second counts to Redis; the admin Traffic tab reads them through any replica.
+
+### Simulation result (10,000 users, 500 units, 3 replicas, 2 workers, 1 NGINX — one laptop)
+| Metric | Value |
+|---|---|
+| Users / requests / duration | 10,000 / 92,457 / 45.6 s |
+| Network errors · 5xx | **0 · 0** |
+| Funnel | 10,000 clicked (+5,212 impatient extra clicks) → **500 reserved** → 453 paid (30 after a card decline) + 47 abandoned (held, auto-released at expiry) · 9,500 told sold out |
+| HTTP codes | 200 × 77,484 · 202 × 500 · 409 × 14,443 (sold out / repeat) · 402 × 30 (simulated declines) |
+| Requests per replica (server-side) | api-1 8,250 · api-2 8,402 · api-3 8,213; average 32–37 ms each; peak 2,530 req/s at the replicas |
+| NGINX cache hits on deal status | 74,200 |
+| Client-observed latency (p50 / p99) | status 73 / 795 ms · reserve 3.5 / 8.1 s · pay 25 / 69 ms |
+| Database truth | Mongo remaining 0 · Redis tokens 0 · 453 CONFIRMED + 47 PENDING_PAYMENT = 500 · oversold **no** |
+
+**Reading the latency honestly:** the replicas answered in about 35 ms on average. The multi-second reserve times are 15,212 near-simultaneous clicks queueing in the generator's 400-socket pool and in Windows NGINX's single select()-based worker — all on the same laptop as the servers and databases. On Linux NGINX (epoll, several workers) with load generators on separate machines, the same backend would show far lower client latency, and a virtual waiting room (§18) would flatten the click spike itself.

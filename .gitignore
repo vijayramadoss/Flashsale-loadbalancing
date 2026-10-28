@@ -8,3 +8,4 @@ dist/
 coverage/
 !.env.test
 !.env.loadtest
+!.env.sim

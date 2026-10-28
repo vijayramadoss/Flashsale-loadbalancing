@@ -1,5 +1,6 @@
 // Central, validated configuration. Every other module imports from here
 // instead of reading process.env directly, so misconfiguration fails fast at boot.
+import os from 'node:os';
 
 const num = (value, fallback) => {
   const n = Number(value);
@@ -13,6 +14,8 @@ export const config = {
   isProduction: nodeEnv === 'production',
   isTest: nodeEnv === 'test',
   port: num(process.env.PORT, 4000),
+  // Name of this API replica (shown in X-Served-By and the Traffic dashboard).
+  replicaId: process.env.REPLICA_ID || `${os.hostname()}-${process.pid}`,
   listenBacklog: num(process.env.LISTEN_BACKLOG, 4096),
 
   mongoUri: process.env.MONGO_URI || 'mongodb://127.0.0.1:27018/flashsale?replicaSet=rs0',

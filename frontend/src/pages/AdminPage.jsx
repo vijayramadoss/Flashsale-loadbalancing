@@ -1,6 +1,7 @@
 // Admin dashboard (separate lazy chunk — shoppers never download it).
 //  Deals:  live consistency counters (Redis vs MongoDB), create, reset (dev only)
 //  Orders: filter by status, mark shipped / delivered
+//  Traffic: requests per second per API replica (shows the load balancer at work)
 import { useEffect, useState } from 'react';
 import { VStack } from '@astryxdesign/core/VStack';
 import { HStack } from '@astryxdesign/core/HStack';
@@ -36,9 +37,10 @@ export default function AdminPage() {
         <SegmentedControl label="Admin section" value={tab} onChange={setTab}>
           <SegmentedControlItem value="deals" label="Flash deals" />
           <SegmentedControlItem value="orders" label="Orders" />
+          <SegmentedControlItem value="traffic" label="Traffic" />
         </SegmentedControl>
       </HStack>
-      {tab === 'deals' ? <DealsTab /> : <OrdersTab />}
+      {tab === 'deals' ? <DealsTab /> : tab === 'orders' ? <OrdersTab /> : <TrafficTab />}
     </VStack>
   );
 }
@@ -281,6 +283,104 @@ function OrdersTab() {
         </Card>
       )}
       {data && data.pages > 1 && <Pagination page={page} onChange={setPage} totalItems={data.total} pageSize={20} />}
+    </VStack>
+  );
+}
+
+// ---------------- traffic (load balancer view) ----------------
+
+const REPLICA_COLORS = ['var(--color-icon-blue, #4c6ef5)', 'var(--color-icon-teal, #12b886)', 'var(--color-icon-purple, #7950f2)', 'var(--color-icon-orange, #f76707)', 'var(--color-icon-pink, #e64980)'];
+
+function TrafficTab() {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer;
+    const load = async () => {
+      try {
+        const { data: d } = await api('/admin/traffic?seconds=60');
+        if (!cancelled) {
+          setData(d);
+          setError('');
+        }
+      } catch (err) {
+        if (!cancelled) setError(err.message);
+      }
+      if (!cancelled) timer = setTimeout(load, 1000);
+    };
+    load();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, []);
+
+  if (!data) return error ? <Banner status="error" title={error} collapsible={false} /> : <Skeleton height={260} />;
+
+  const ids = data.replicas.filter((r) => r.id.startsWith('api') || data.totals[r.id]).map((r) => r.id);
+  const color = (id) => REPLICA_COLORS[Math.max(0, ids.indexOf(id)) % REPLICA_COLORS.length];
+  const total = Object.values(data.totals).reduce((n, t) => n + t.req, 0);
+  const last = data.series.at(-1)?.replicas || {};
+  const peak = Math.max(1, ...data.series.map((p) => Object.values(p.replicas).reduce((n, m) => n + m.req, 0)));
+  const nowRps = Object.values(last).reduce((n, m) => n + m.req, 0);
+
+  return (
+    <VStack gap={5}>
+      <Text type="supporting">
+        Every API replica counts the requests it served and reports once a second. The load balancer (NGINX, least connections)
+        decides which replica gets each request — balanced bars mean the pool is sharing the work.
+      </Text>
+      <Grid columns={{ minWidth: 150, max: 4 }} gap={3}>
+        <Stat label="Requests / s (last second)" value={nowRps} />
+        <Stat label="Requests, last 60 s" value={total} />
+        <Stat label="Peak requests / s" value={peak === 1 && total === 0 ? 0 : peak} />
+        <Stat label="Replicas reporting" value={`${data.replicas.filter((r) => r.alive).length} / ${data.replicas.length}`} />
+      </Grid>
+
+      <Card>
+        <VStack gap={2}>
+          <Heading level={3}>Requests per second, by replica (last 60 s)</Heading>
+          <div className="traffic-chart" role="img" aria-label={`Requests per second for the last 60 seconds, peak ${peak}`}>
+            {data.series.map((p) => (
+              <div key={p.t} className="traffic-col" title={`${new Date(p.t * 1000).toLocaleTimeString()} — ${Object.entries(p.replicas).map(([id, m]) => `${id}: ${m.req}`).join(', ') || 'idle'}`}>
+                {ids.map((id) => (p.replicas[id]?.req ? <div key={id} style={{ height: `${(p.replicas[id].req / peak) * 100}%`, background: color(id) }} /> : null))}
+              </div>
+            ))}
+          </div>
+          <HStack gap={4} wrap="wrap">
+            {ids.map((id) => (
+              <HStack key={id} gap={1.5} vAlign="center"><span className="legend-dot" style={{ background: color(id) }} /><Text size="sm">{id}</Text></HStack>
+            ))}
+          </HStack>
+        </VStack>
+      </Card>
+
+      <Grid columns={{ minWidth: 220, max: 3 }} gap={3}>
+        {data.replicas.map((r) => {
+          const t = data.totals[r.id] || { req: 0, '2xx': 0, '4xx': 0, '5xx': 0, ms: 0 };
+          const share = total ? Math.round((t.req / total) * 100) : 0;
+          return (
+            <Card key={r.id}>
+              <VStack gap={2}>
+                <HStack gap={2} vAlign="center" hAlign="between">
+                  <HStack gap={1.5} vAlign="center"><span className="legend-dot" style={{ background: color(r.id) }} /><Text weight="semibold">{r.id}</Text></HStack>
+                  <Badge label={r.alive ? 'Up' : 'Not reporting'} variant={r.alive ? 'success' : 'error'} />
+                </HStack>
+                <Text type="display-3" weight="semibold" hasTabularNumbers>{share}%</Text>
+                <Text type="supporting" size="sm">
+                  {t.req.toLocaleString('en-IN')} requests · {last[r.id]?.req || 0}/s now · avg {t.req ? (t.ms / t.req).toFixed(1) : '0'} ms
+                </Text>
+                <Text size="sm">
+                  <span className="hint-success-text">{t['2xx'].toLocaleString('en-IN')} ok</span> · <span className="hint-warning">{t['4xx'].toLocaleString('en-IN')} 4xx</span> · <span className="hint-error">{t['5xx']} 5xx</span>
+                </Text>
+              </VStack>
+            </Card>
+          );
+        })}
+      </Grid>
+      {data.replicas.length === 0 && <Text type="supporting">No replica has reported yet. Traffic appears here within a second of requests arriving.</Text>}
     </VStack>
   );
 }

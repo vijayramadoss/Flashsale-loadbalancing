@@ -13,6 +13,8 @@ export const keys = {
   orderStream: () => `${p()}orders:stream`,
   rateLimit: (bucket, id) => `${p()}rl:${bucket}:${id}`,
   catalog: (hash) => `${p()}cache:catalog:${hash}`,
+  trafficSecond: (sec) => `${p()}stats:sec:${sec}`,
+  trafficReplicas: () => `${p()}stats:replicas`,
 };
 
 export const ORDER_GROUP = 'order-writers';

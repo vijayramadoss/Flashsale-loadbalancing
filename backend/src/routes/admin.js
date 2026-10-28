@@ -3,6 +3,7 @@ import { authenticate, requireAdmin } from '../plugins/guards.js';
 import * as dealService from '../services/dealService.js';
 import * as orderService from '../services/orderService.js';
 import { idParams, money, sku } from '../schemas/common.js';
+import { readTraffic } from '../plugins/traffic.js';
 
 export default async function adminRoutes(app) {
   // Applies to every route in this plugin (Fastify hooks are scoped to the plugin).
@@ -13,6 +14,12 @@ export default async function adminRoutes(app) {
   });
 
   app.get('/deals', async () => ({ deals: await dealService.listAllDeals() }));
+
+  // Requests per second per API replica (written by plugins/traffic.js) — shows the load balancer at work.
+  app.get('/traffic', {
+    schema: { querystring: { type: 'object', properties: { seconds: { type: 'integer', minimum: 5, maximum: 170, default: 60 } } } },
+    handler: async (req) => readTraffic(req.query.seconds),
+  });
 
   app.post('/deals', {
     schema: {

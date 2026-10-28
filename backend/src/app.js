@@ -11,6 +11,7 @@ import { getRedis } from './lib/redis.js';
 import { notFound } from './lib/errors.js';
 import { errorHandler } from './plugins/errors.js';
 import { rateLimit } from './plugins/guards.js';
+import { trafficPlugin } from './plugins/traffic.js';
 import authRoutes from './routes/auth.js';
 import catalogRoutes from './routes/catalog.js';
 import dealRoutes from './routes/deals.js';
@@ -35,6 +36,7 @@ export async function buildApp() {
   await app.register(helmet, { crossOriginEmbedderPolicy: false });
   await app.register(compress, { threshold: 1024, global: true });
   app.setErrorHandler(errorHandler);
+  await app.register(trafficPlugin);
 
   await app.register(
     async (api) => {
