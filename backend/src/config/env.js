@@ -24,9 +24,10 @@ export const config = {
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '2h',
   bcryptRounds: num(process.env.BCRYPT_ROUNDS, 10),
 
-  // Number of reverse proxies in front of the app (NGINX/ALB). Controls how
-  // req.ip is derived from X-Forwarded-For. 0 = trust nothing (direct exposure).
-  trustProxy: num(process.env.TRUST_PROXY, 0),
+  // Addresses/CIDRs of the reverse proxies in front of the app (NGINX/ALB),
+  // comma-separated, e.g. "10.0.0.0/8" or "loopback". Only requests arriving
+  // from these may set the client IP via X-Forwarded-For. Empty = trust nobody.
+  trustProxy: (process.env.TRUST_PROXY || '').trim() === '0' ? '' : (process.env.TRUST_PROXY || '').trim(),
 
   rateLimit: {
     windowSec: num(process.env.RATE_LIMIT_WINDOW_SEC, 10),
@@ -41,7 +42,19 @@ export const config = {
     maxDeliveries: num(process.env.WORKER_MAX_DELIVERIES, 5),
     // Pending messages idle longer than this are assumed to belong to a crashed consumer.
     claimIdleMs: num(process.env.WORKER_CLAIM_IDLE_MS, 30000),
+    // How often the worker looks for unpaid orders whose hold has expired.
+    sweepIntervalMs: num(process.env.WORKER_SWEEP_INTERVAL_MS, 10000),
   },
+
+  orders: {
+    // Stock is held for a cart order this long while the customer pays.
+    cartHoldMinutes: num(process.env.CART_HOLD_MINUTES, 15),
+    maxLines: 10,
+    maxQtyPerLine: 5,
+  },
+
+  // Seconds a catalog listing is cached in Redis (shared by every replica).
+  catalogCacheSec: num(process.env.CATALOG_CACHE_SEC, 30),
 
   webConcurrency: num(process.env.WEB_CONCURRENCY, 0), // 0 = one per CPU core
   serveFrontend: process.env.SERVE_FRONTEND === 'true',

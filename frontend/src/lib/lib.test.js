@@ -32,7 +32,7 @@ test('clock offset corrects for half the round trip', () => {
   assert.equal(offset, 10_000);
 });
 
-test('checkout: happy path idle → submitting → queued → confirmed', () => {
+test('reserve: happy path idle → submitting → queued → reserved', () => {
   let s = checkoutReducer(initialCheckout, { type: 'SUBMIT' });
   assert.equal(s.phase, 'submitting');
   assert.equal(s.optimistic, true);
@@ -40,18 +40,19 @@ test('checkout: happy path idle → submitting → queued → confirmed', () => 
   s = checkoutReducer(s, { type: 'ACCEPTED', status: 'QUEUED', reservationId: 'r1', trackingUrl: '/api/checkout/r1' });
   assert.equal(s.phase, 'queued');
   assert.equal(canSubmit(s.phase), false);
-  s = checkoutReducer(s, { type: 'STATUS', status: 'CONFIRMED', orderId: 'o1' });
-  assert.equal(s.phase, 'confirmed');
+  s = checkoutReducer(s, { type: 'STATUS', status: 'RESERVED', orderId: 'o1' });
+  assert.equal(s.phase, 'reserved');
+  assert.equal(s.orderId, 'o1');
 });
 
-test('checkout: sold out rolls back the optimistic update', () => {
+test('reserve: sold out rolls back the optimistic update', () => {
   let s = checkoutReducer(initialCheckout, { type: 'SUBMIT' });
   s = checkoutReducer(s, { type: 'REJECTED', code: 'SOLD_OUT', message: 'gone' });
   assert.equal(s.phase, 'soldOut');
   assert.equal(s.optimistic, false);
 });
 
-test('checkout: transient errors auto-retry a bounded number of times, then surface', () => {
+test('reserve: transient errors auto-retry a bounded number of times, then surface', () => {
   let s = initialCheckout;
   for (let i = 0; i < MAX_AUTO_RETRIES; i++) {
     s = checkoutReducer(s, { type: 'SUBMIT' });
@@ -65,9 +66,10 @@ test('checkout: transient errors auto-retry a bounded number of times, then surf
   assert.equal(canSubmit(s.phase), true, 'user can retry manually');
 });
 
-test('checkout: a duplicate response that is already CONFIRMED goes straight to confirmed', () => {
-  const s = checkoutReducer(checkoutReducer(initialCheckout, { type: 'SUBMIT' }), { type: 'ACCEPTED', status: 'CONFIRMED', reservationId: 'r1' });
-  assert.equal(s.phase, 'confirmed');
+test('reserve: a repeat click whose reservation is already RESERVED goes straight to checkout', () => {
+  const s = checkoutReducer(checkoutReducer(initialCheckout, { type: 'SUBMIT' }), { type: 'ACCEPTED', status: 'RESERVED', reservationId: 'r1', orderId: 'o9' });
+  assert.equal(s.phase, 'reserved');
+  assert.equal(s.orderId, 'o9');
 });
 
 test('countdown formatting', () => {

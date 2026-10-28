@@ -1,12 +1,12 @@
 // Flash-sale load test + integrity check.
 //
-// 1. Creates a fresh sale (default 500 units) that starts a few seconds from now.
+// 1. Creates a fresh flash deal (default 500 units) that starts a few seconds from now.
 // 2. Mints JWTs for many synthetic buyers (no DB round-trip; same secret as the API).
-// 3. Waits for the start, then fires a burst of checkout requests at the RUNNING
+// 3. Waits for the start, then fires a burst of "Buy now" (reserve) requests at the RUNNING
 //    API (ideally the cluster: `npm run start:loadtest`), each buyer clicking
 //    several times, from many simulated client IPs (X-Forwarded-For, as NGINX would send).
 // 4. Waits for the order worker to drain the queue and verifies:
-//      orders == stock, Mongo remaining == 0, no 5xx, no network errors/timeouts.
+//      pending orders == stock, Mongo remaining == 0, no 5xx, no network errors/timeouts.
 //
 // Uses the isolated database / Redis prefix from .env.loadtest so dev data is untouched.
 // Usage: npm run loadtest -- [--requests=20000] [--buyers=5000] [--connections=200] [--stock=500]
@@ -15,7 +15,8 @@ import mongoose from 'mongoose';
 import { config } from '../src/config/env.js';
 import { connectMongo, disconnectMongo } from '../src/lib/mongo.js';
 import { closeRedis, getRedis, waitForRedis } from '../src/lib/redis.js';
-import { createSale, getSaleStats } from '../src/services/saleService.js';
+import { createDeal, getDealStats } from '../src/services/dealService.js';
+import { Product } from '../src/models/Product.js';
 import { signToken } from '../src/services/authService.js';
 
 const arg = (name, fallback) => {
@@ -37,24 +38,31 @@ await connectMongo();
 await waitForRedis(getRedis());
 
 const startsAt = new Date(Date.now() + 4000);
-const sale = await createSale({
+const tag = Date.now().toString(36).toUpperCase();
+const product = await Product.create({
+  slug: `load-test-phone-${tag.toLowerCase()}`,
+  brand: 'LoadTest',
+  name: `Load Test Phone ${tag}`,
+  variants: [{ sku: `LT-${tag}`, color: 'Black', colorHex: '#111111', storage: '128 GB', ram: '8 GB', priceCents: 1_000_000, mrpCents: 1_200_000, stock: 10 }],
+});
+const deal = await createDeal({
+  sku: product.variants[0].sku,
   title: `Load test ${new Date().toISOString()}`,
+  dealPriceCents: 500_000,
+  totalStock: STOCK,
   startsAt,
   endsAt: new Date(startsAt.getTime() + 30 * 60_000),
-  totalStock: STOCK,
-  product: { name: 'Load Test Phone', priceCents: 100, currency: 'INR' },
 });
-const saleId = sale._id.toString();
+const dealId = deal._id.toString();
 
 const buyers = Array.from({ length: BUYERS }, (_, i) => ({
   auth: `Bearer ${signToken({ _id: new mongoose.Types.ObjectId(), role: 'customer', name: `buyer${i}` })}`,
   ip: `10.${(i >> 16) & 255}.${(i >> 8) & 255}.${i & 255}`,
 }));
-const body = JSON.stringify({ saleId });
 const statusCounts = {};
 let n = 0;
 
-console.log(`Sale ${saleId}: ${STOCK} units. ${REQUESTS} requests from ${BUYERS} buyers over ${CONNECTIONS} connections → ${TARGET}`);
+console.log(`Deal ${dealId}: ${STOCK} units. ${REQUESTS} requests from ${BUYERS} buyers over ${CONNECTIONS} connections → ${TARGET}`);
 await new Promise((r) => setTimeout(r, Math.max(0, startsAt - Date.now()) + 50));
 
 const t0 = Date.now();
@@ -66,14 +74,12 @@ const result = await autocannon({
   requests: [
     {
       method: 'POST',
-      path: '/api/checkout',
+      path: `/api/deals/${dealId}/reserve`,
       setupRequest: (req) => {
         const b = buyers[n++ % BUYERS];
         return {
           ...req,
-          body,
           headers: {
-            'content-type': 'application/json',
             'user-agent': 'Mozilla/5.0 (LoadTest) AppleWebKit/537.36 Chrome/130 Safari/537.36',
             authorization: b.auth,
             'x-forwarded-for': b.ip,
@@ -92,8 +98,8 @@ const burstMs = Date.now() - t0;
 let stats;
 const drainStart = Date.now();
 for (;;) {
-  stats = await getSaleStats(saleId);
-  if (stats.queue.pendingUnacked === 0 && stats.mongo.confirmedOrders === STOCK - (stats.redis.remainingTokens ?? 0)) break;
+  stats = await getDealStats(dealId);
+  if (stats.queue.pendingUnacked === 0 && stats.orders.pendingPayment === STOCK - (stats.redis.remainingTokens ?? 0)) break;
   if (Date.now() - drainStart > 60_000) break;
   await new Promise((r) => setTimeout(r, 250));
 }
@@ -119,7 +125,7 @@ const checks = [
   ['every request got an HTTP answer', answered === REQUESTS && result.errors === 0 && result.timeouts === 0],
   ['no 5xx responses', fiveXX === 0],
   [`exactly ${STOCK} accepted (202)`, statusCounts[202] === STOCK],
-  [`exactly ${STOCK} orders in MongoDB`, stats.mongo.confirmedOrders === STOCK],
+  [`exactly ${STOCK} pending orders in MongoDB`, stats.orders.pendingPayment === STOCK],
   ['Mongo remaining stock is 0', stats.mongo.remainingStock === 0],
   ['not oversold', !stats.consistency.oversold && stats.consistency.countersMatchOrders],
 ];

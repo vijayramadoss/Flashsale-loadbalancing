@@ -1,103 +1,107 @@
-// Defence-in-depth and failure-mode tests for the order worker.
+// Defence-in-depth and failure-mode tests for the flash-deal worker.
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import mongoose from 'mongoose';
-import { FlashSale } from '../src/models/FlashSale.js';
+import { Deal } from '../src/models/Deal.js';
 import { Order } from '../src/models/Order.js';
 import { createRedis, getRedis, keys, ORDER_GROUP, waitForRedis } from '../src/lib/redis.js';
-import { reserve, getReservation } from '../src/services/checkoutService.js';
+import { reserve, getReservation } from '../src/services/reservationService.js';
 import { persistReservation } from '../src/services/orderProcessor.js';
 import { ensureGroup, reclaimStale } from '../src/services/orderWorker.js';
-import { setup, teardown, resetData, makeSale, drainQueue } from './helpers.js';
+import { setup, teardown, resetData, makeDeal, drainQueue } from './helpers.js';
 
-before(setup);
-after(teardown);
+let app;
+before(async () => {
+  app = await setup();
+});
+after(() => teardown(app));
 beforeEach(resetData);
 
 const newUserId = () => new mongoose.Types.ObjectId().toString();
 
 test('MongoDB conditional decrement stops overselling even if Redis admits too many', async () => {
-  const sale = await makeSale({ stock: 50 });
-  // Simulate Redis drift: Mongo only has 10 units left, Redis still thinks 50.
-  await FlashSale.updateOne({ _id: sale._id }, { remainingStock: 10, soldCount: 0, totalStock: 50 });
-
-  const reservations = [];
-  for (let i = 0; i < 50; i++) reservations.push(await reserve(newUserId(), String(sale._id)));
-  assert.equal(reservations.length, 50);
+  const deal = await makeDeal({ stock: 50 });
+  // Simulate Redis drift: Mongo has only 10 units left, Redis still thinks 50.
+  await Deal.updateOne({ _id: deal._id }, { remainingStock: 10, soldCount: 0 });
+  for (let i = 0; i < 50; i++) await reserve(newUserId(), String(deal._id));
 
   await drainQueue();
-  assert.equal(await Order.countDocuments({ sale: sale._id }), 10, 'DB sold only what it had');
-  const db = await FlashSale.findById(sale._id);
-  assert.equal(db.remainingStock, 0);
-  assert.ok(db.remainingStock >= 0, 'stock never negative');
-  // The worker zeroes the Redis counter once Mongo reports sold out, so admission stops.
-  assert.equal(await getRedis().hget(keys.sale(sale._id), 'stock'), '0');
+  assert.equal(await Order.countDocuments({ deal: deal._id }), 10, 'DB created only what it had');
+  assert.equal((await Deal.findById(deal._id)).remainingStock, 0);
+  assert.equal(await getRedis().hget(keys.deal(deal._id), 'stock'), '0', 'Redis zeroed once Mongo said sold out');
 });
 
-test('failed reservations are reported to the client with a reason', async () => {
-  const sale = await makeSale({ stock: 2 });
-  await FlashSale.updateOne({ _id: sale._id }, { remainingStock: 1 });
+test('failed reservations are reported with a reason', async () => {
+  const deal = await makeDeal({ stock: 2 });
+  await Deal.updateOne({ _id: deal._id }, { remainingStock: 1 });
   const u1 = newUserId();
   const u2 = newUserId();
-  const r1 = await reserve(u1, String(sale._id));
-  const r2 = await reserve(u2, String(sale._id));
+  const r1 = await reserve(u1, String(deal._id));
+  const r2 = await reserve(u2, String(deal._id));
   await drainQueue();
-  assert.equal((await getReservation(r1.reservationId, u1)).status, 'CONFIRMED');
+  assert.equal((await getReservation(r1.reservationId, u1)).status, 'RESERVED');
   const failed = await getReservation(r2.reservationId, u2);
   assert.equal(failed.status, 'FAILED');
   assert.equal(failed.reason, 'SOLD_OUT');
 });
 
 test('processing the same queue message twice creates only one order (idempotent)', async () => {
-  const sale = await makeSale({ stock: 5 });
-  const job = { reservationId: 'res-dup-1', saleId: String(sale._id), userId: newUserId() };
+  const deal = await makeDeal({ stock: 5 });
+  const job = { reservationId: 'res-dup-1', dealId: String(deal._id), userId: newUserId(), createdAt: String(Date.now()) };
   const first = await persistReservation(job);
   const second = await persistReservation(job);
-  assert.equal(first.status, 'CONFIRMED');
+  assert.equal(first.status, 'RESERVED');
   assert.equal(second.orderId, first.orderId);
   assert.equal(await Order.countDocuments(), 1);
-  assert.equal((await FlashSale.findById(sale._id)).remainingStock, 4, 'decremented once');
+  assert.equal((await Deal.findById(deal._id)).remainingStock, 4, 'decremented once');
 });
 
-test('two concurrent transactions on the last unit: exactly one wins', async () => {
-  const sale = await makeSale({ stock: 1 });
-  const jobs = [1, 2, 3, 4].map((i) => ({ reservationId: `race-${i}`, saleId: String(sale._id), userId: newUserId() }));
+test('four concurrent transactions on the last unit: exactly one wins', async () => {
+  const deal = await makeDeal({ stock: 1 });
+  const jobs = [1, 2, 3, 4].map((i) => ({ reservationId: `race-${i}`, dealId: String(deal._id), userId: newUserId() }));
   const outcomes = await Promise.all(jobs.map((j) => persistReservation(j)));
-  assert.equal(outcomes.filter((o) => o.status === 'CONFIRMED').length, 1);
+  assert.equal(outcomes.filter((o) => o.status === 'RESERVED').length, 1);
   assert.equal(await Order.countDocuments(), 1);
-  assert.equal((await FlashSale.findById(sale._id)).remainingStock, 0);
+  assert.equal((await Deal.findById(deal._id)).remainingStock, 0);
+});
+
+test('one customer can never hold two active orders for one deal (DB backstop)', async () => {
+  const deal = await makeDeal({ stock: 5 });
+  const userId = newUserId();
+  const a = await persistReservation({ reservationId: 'r-a', dealId: String(deal._id), userId });
+  const b = await persistReservation({ reservationId: 'r-b', dealId: String(deal._id), userId });
+  assert.equal(a.status, 'RESERVED');
+  assert.deepEqual(b, { status: 'FAILED', reason: 'ALREADY_PURCHASED' });
+  assert.equal((await Deal.findById(deal._id)).remainingStock, 4, 'rolled back, stock untouched');
 });
 
 test('a message read by a crashed consumer is reclaimed and processed exactly once', async () => {
-  const sale = await makeSale({ stock: 3 });
+  const deal = await makeDeal({ stock: 3 });
   const userId = newUserId();
-  const r = await reserve(userId, String(sale._id));
+  const r = await reserve(userId, String(deal._id));
   await ensureGroup();
-
-  // "Crashed" consumer reads the message but dies before acknowledging it.
   const crashed = createRedis('crashed');
   await waitForRedis(crashed);
   const read = await crashed.xreadgroup('GROUP', ORDER_GROUP, 'crashed-consumer', 'COUNT', 10, 'STREAMS', keys.orderStream(), '>');
   assert.equal(read[0][1].length, 1);
   crashed.disconnect();
-  assert.equal(await drainQueue(), 0, 'a healthy consumer does not get the in-flight message again');
+  assert.equal(await drainQueue(), 0, 'a healthy consumer does not get the in-flight message');
 
-  const reclaimed = await reclaimStale('rescuer', 0);
-  assert.equal(reclaimed, 1);
-  assert.equal((await getReservation(r.reservationId, userId)).status, 'CONFIRMED');
+  assert.equal(await reclaimStale('rescuer', 0), 1);
+  assert.equal((await getReservation(r.reservationId, userId)).status, 'RESERVED');
   assert.equal(await Order.countDocuments(), 1);
   const [pendingCount] = await getRedis().xpending(keys.orderStream(), ORDER_GROUP);
-  assert.equal(Number(pendingCount), 0, 'acknowledged after processing');
+  assert.equal(Number(pendingCount), 0);
+  assert.equal(await getRedis().xlen(keys.orderStream()), 0, 'processed messages are deleted');
 });
 
-test('if Redis loses the sale, it is rebuilt from MongoDB and previous buyers still cannot rebuy', async () => {
-  const sale = await makeSale({ stock: 3 });
+test('if Redis loses the deal it is rebuilt from MongoDB; previous winners still cannot win twice', async () => {
+  const deal = await makeDeal({ stock: 3 });
   const userId = newUserId();
-  await reserve(userId, String(sale._id));
+  await reserve(userId, String(deal._id));
   await drainQueue();
-  await getRedis().del(keys.sale(sale._id), keys.buyers(sale._id)); // simulate data loss
-
-  const again = await reserve(userId, String(sale._id));
-  assert.equal(again.duplicate, true, 'buyer list was rebuilt from orders');
-  assert.equal(await getRedis().hget(keys.sale(sale._id), 'stock'), '2', 'stock rebuilt from Mongo');
+  await getRedis().del(keys.deal(deal._id), keys.buyers(deal._id));
+  const again = await reserve(userId, String(deal._id));
+  assert.equal(again.duplicate, true, 'buyer list rebuilt from active orders');
+  assert.equal(await getRedis().hget(keys.deal(deal._id), 'stock'), '2', 'stock rebuilt from Mongo');
 });

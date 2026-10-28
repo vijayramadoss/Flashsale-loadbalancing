@@ -1,59 +1,56 @@
-import { useEffect, useState } from 'react';
-import { api } from '../api.js';
-import { useAuth } from '../auth.jsx';
-import { Link } from '../router.jsx';
-import { formatPrice } from '../lib/format.js';
+import { VStack } from '@astryxdesign/core/VStack';
+import { HStack } from '@astryxdesign/core/HStack';
+import { StackItem } from '@astryxdesign/core/Stack';
+import { ClickableCard } from '@astryxdesign/core/ClickableCard';
+import { Heading } from '@astryxdesign/core/Heading';
+import { Text } from '@astryxdesign/core/Text';
+import { Badge } from '@astryxdesign/core/Badge';
+import { Button } from '@astryxdesign/core/Button';
+import { Pagination } from '@astryxdesign/core/Pagination';
+import { EmptyState } from '@astryxdesign/core/EmptyState';
+import { Skeleton } from '@astryxdesign/core/Skeleton';
+import { useApi } from '../hooks/useApi.js';
+import { navigate, useLocation } from '../router.jsx';
+import { ORDER_STATUS, formatDateTime, formatPrice, productTitle } from '../lib/format.js';
+import PhoneArt from '../components/PhoneArt.jsx';
 
 export default function OrdersPage() {
-  const { user } = useAuth();
-  const [orders, setOrders] = useState(null);
-  const [error, setError] = useState('');
-
-  useEffect(() => {
-    if (!user) return undefined;
-    let cancelled = false;
-    api('/orders/mine')
-      .then(({ data }) => !cancelled && setOrders(data.orders))
-      .catch((err) => !cancelled && setError(err.message));
-    return () => { cancelled = true; };
-  }, [user]);
-
-  if (!user) {
-    return (
-      <p className="card center">
-        <Link to="/login">Log in</Link> to see your orders.
-      </p>
-    );
-  }
+  const { query } = useLocation();
+  const page = Number(query.get('page')) || 1;
+  const { data, error } = useApi(`/orders?page=${page}`);
 
   return (
-    <section className="card">
-      <h1>My orders</h1>
-      {error && <p className="err">{error}</p>}
-      {!orders && !error && <p className="muted">Loading…</p>}
-      {orders && orders.length === 0 && (
-        <p className="muted">
-          No orders yet. <Link to="/">Go to the sale</Link>
-        </p>
+    <VStack gap={5}>
+      <Heading level={1}>My orders</Heading>
+      {error && <Text className="hint-error">{error.message}</Text>}
+      {!data && !error && <VStack gap={3}><Skeleton height={110} /><Skeleton height={110} index={1} /></VStack>}
+      {data?.orders.length === 0 && (
+        <EmptyState title="No orders yet" description="When you buy a phone it will show up here." actions={<Button label="Shop phones" href="/phones" variant="primary" />} />
       )}
-      {orders && orders.length > 0 && (
-        <ul className="orders">
-          {orders.map((o) => (
-            <li key={o.id}>
-              <img src={o.imageUrl || '/phone.svg'} alt="" width="48" height="64" loading="lazy" />
-              <div>
-                <strong>{o.productName}</strong>
-                <span className="muted small">{o.saleTitle} · {new Date(o.createdAt).toLocaleString()}</span>
-                <span className="muted small">Order {o.id}</span>
-              </div>
-              <div className="right">
-                <span className="badge badge-live">{o.status}</span>
-                <span>{formatPrice(o.priceCents)}</span>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
+      <VStack gap={3}>
+        {data?.orders.map((o) => {
+          const s = ORDER_STATUS[o.status];
+          const first = o.items[0];
+          return (
+            <ClickableCard key={o.id} label={`Order ${o.orderNumber}, ${s.label}`} href={`/orders/${o.id}`} padding={4}>
+              <HStack gap={4} vAlign="center" wrap="wrap">
+                <div className="line-art"><PhoneArt colorHex={first.colorHex} design={first.design} size="xs" /></div>
+                <StackItem size="fill">
+                  <VStack gap={0.5}>
+                    <Text weight="semibold">{productTitle(first.brand, first.name)}{o.items.length > 1 ? ` + ${o.items.length - 1} more` : ''}</Text>
+                    <Text type="supporting" size="sm">{o.orderNumber} · {formatDateTime(o.createdAt)}</Text>
+                  </VStack>
+                </StackItem>
+                <VStack gap={1} hAlign="end">
+                  <Badge label={s.label} variant={s.badge} />
+                  <Text hasTabularNumbers weight="semibold">{formatPrice(o.pricing.totalCents)}</Text>
+                </VStack>
+              </HStack>
+            </ClickableCard>
+          );
+        })}
+      </VStack>
+      {data && data.pages > 1 && <Pagination page={page} onChange={(p) => navigate(`/orders?page=${p}`)} totalPages={data.pages} />}
+    </VStack>
   );
 }

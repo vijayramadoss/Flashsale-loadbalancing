@@ -5,15 +5,20 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && node scripts/check-bundle.js",
+    "build": "vite build && node scripts/precompress.js && node scripts/check-bundle.js",
     "preview": "vite preview",
     "test": "node --test \"src/lib/*.test.js\""
   },
   "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "@astryxdesign/core": "0.7.4",
+    "@astryxdesign/theme-neutral": "0.7.4",
+    "@stylexjs/stylex": "0.19.1",
+    "lucide-react": "^1.62.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
+    "@astryxdesign/cli": "0.7.4",
     "@vitejs/plugin-react": "^4.7.0",
     "vite": "^6.4.5"
   }

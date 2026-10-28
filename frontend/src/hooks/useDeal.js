@@ -1,47 +1,40 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
-import { api } from './api.js';
-import { checkoutReducer, initialCheckout } from './lib/checkout.js';
-import { clockOffset, reservationPollDelay, salePollDelay, withJitter } from './lib/polling.js';
+import { api } from '../api.js';
+import { checkoutReducer, initialCheckout } from '../lib/checkout.js';
+import { clockOffset, reservationPollDelay, salePollDelay, withJitter } from '../lib/polling.js';
 
 /**
- * Live sale status with adaptive polling (see salePollDelay) and server-clock
- * sync. Polling pauses its pace in background tabs and stops when the sale is
- * final. Network errors keep the last good data on screen and retry.
+ * Live deal status with adaptive polling and server-clock sync: rare polls
+ * while the deal is far away, frequent around launch, none once it is final;
+ * 4× slower in background tabs; ±20 % jitter so clients don't poll in lock-step.
  */
-export function useSaleStatus(saleId) {
-  const [sale, setSale] = useState(null);
+export function useDealStatus(dealId) {
+  const [deal, setDeal] = useState(null);
   const [error, setError] = useState(null);
   const [offset, setOffset] = useState(0); // serverTime - clientTime (ms)
 
   useEffect(() => {
-    if (!saleId) return undefined;
+    if (!dealId) return undefined;
     let cancelled = false;
     let timer;
-
     const load = async () => {
       const sentAt = Date.now();
       try {
-        const { data } = await api(`/sales/${saleId}`, { auth: false });
+        const { data } = await api(`/deals/${dealId}`, { auth: false });
         if (cancelled) return;
-        const off = clockOffset(data.sale.serverTime, sentAt, Date.now());
+        const off = clockOffset(data.deal.serverTime, sentAt, Date.now());
         setOffset(off);
-        setSale(data.sale);
+        setDeal(data.deal);
         setError(null);
-        schedule(data.sale, off);
+        const msUntilStart = Date.parse(data.deal.startsAt) - (Date.now() + off);
+        const delay = salePollDelay({ state: data.deal.state, msUntilStart, hidden: document.hidden });
+        if (delay !== null) timer = setTimeout(load, withJitter(delay));
       } catch (err) {
         if (cancelled) return;
         setError(err);
         timer = setTimeout(load, withJitter(5000));
       }
     };
-
-    const schedule = (s, off) => {
-      const msUntilStart = Date.parse(s.startsAt) - (Date.now() + off);
-      const delay = salePollDelay({ state: s.state, msUntilStart, hidden: document.hidden });
-      if (delay !== null) timer = setTimeout(load, withJitter(delay));
-    };
-
-    // Coming back to the tab → refresh immediately instead of waiting out a long background interval.
     const onVisible = () => {
       if (!document.hidden) {
         clearTimeout(timer);
@@ -55,22 +48,20 @@ export function useSaleStatus(saleId) {
       clearTimeout(timer);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [saleId]);
+  }, [dealId]);
 
-  return { sale, error, offset };
+  return { deal, error, offset };
 }
 
-const resumeKey = (saleId) => `fs.reservation.${saleId}`;
-
 /**
- * Checkout flow for one sale: submit with a synchronous click lock, then poll
- * the tracking URL until the worker confirms or fails the order.
+ * Flash-deal "Buy now": submit with a synchronous click lock, then poll the
+ * reservation until the worker has created the pending order (→ checkout).
  */
-export function useCheckout(saleId, userId) {
+export function useReserve(dealId) {
   const [state, dispatch] = useReducer(checkoutReducer, initialCheckout);
   // A ref, not state: React state updates are asynchronous, so two clicks in
   // the same frame would both see "idle". The ref flips synchronously on the
-  // first click and the second one returns immediately — no duplicate payload.
+  // first click; the second returns immediately — no duplicate request.
   const inFlight = useRef(false);
 
   const submit = useCallback(async () => {
@@ -78,26 +69,14 @@ export function useCheckout(saleId, userId) {
     inFlight.current = true;
     dispatch({ type: 'SUBMIT' });
     try {
-      const { data } = await api('/checkout', { method: 'POST', body: { saleId } });
-      dispatch({ type: 'ACCEPTED', status: data.status, reservationId: data.reservationId, trackingUrl: data.trackingUrl });
-      try {
-        sessionStorage.setItem(resumeKey(saleId), JSON.stringify({ userId, trackingUrl: data.trackingUrl, reservationId: data.reservationId }));
-      } catch { /* not critical */ }
+      const { data } = await api(`/deals/${dealId}/reserve`, { method: 'POST' });
+      dispatch({ type: 'ACCEPTED', status: data.status, reservationId: data.reservationId, trackingUrl: data.trackingUrl, orderId: data.orderId });
     } catch (err) {
       dispatch({ type: 'REJECTED', code: err.code, message: err.message, retryAfter: err.retryAfter });
     } finally {
       inFlight.current = false;
     }
-  }, [saleId, userId]);
-
-  // Resume tracking after a page refresh.
-  useEffect(() => {
-    dispatch({ type: 'RESET' });
-    try {
-      const saved = JSON.parse(sessionStorage.getItem(resumeKey(saleId)) || 'null');
-      if (saved && saved.userId === userId) dispatch({ type: 'ACCEPTED', status: 'QUEUED', ...saved });
-    } catch { /* ignore */ }
-  }, [saleId, userId]);
+  }, [dealId]);
 
   // Automatic retry for transient rejections (429 / 503 / network), with a visible countdown.
   const [retryIn, setRetryIn] = useState(0);
@@ -115,7 +94,7 @@ export function useCheckout(saleId, userId) {
     return () => clearInterval(tick);
   }, [state.phase, state.retryInSec, state.attempts, submit]);
 
-  // Poll the reservation until it is final.
+  // Poll the reservation until RESERVED or FAILED.
   useEffect(() => {
     if (state.phase !== 'queued' || !state.trackingUrl) return undefined;
     let cancelled = false;
@@ -129,27 +108,22 @@ export function useCheckout(saleId, userId) {
         const r = data.reservation;
         if (r.status !== 'QUEUED') {
           dispatch({ type: 'STATUS', status: r.status, orderId: r.orderId, reason: r.reason });
-          if (r.status === 'FAILED') sessionStorage.removeItem(resumeKey(saleId));
           return;
         }
         delay = reservationPollDelay(attempt++, retryAfter);
       } catch (err) {
         if (cancelled) return;
-        if (err.status === 404) {
-          sessionStorage.removeItem(resumeKey(saleId));
-          dispatch({ type: 'RESET' });
-          return;
-        }
+        if (err.status === 404) return dispatch({ type: 'RESET' });
         delay = reservationPollDelay(attempt++); // transient: keep trying, slower
       }
       timer = setTimeout(poll, withJitter(delay));
     };
-    timer = setTimeout(poll, 500);
+    timer = setTimeout(poll, 400);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [state.phase, state.trackingUrl, saleId]);
+  }, [state.phase, state.trackingUrl]);
 
   return { state, submit, retryIn };
 }

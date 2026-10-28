@@ -1,7 +1,7 @@
-// Checkout state machine. Every UI state the buyer can be in is explicit,
-// which is what keeps the page responsive and honest under load:
+// Flash-deal "Buy now" state machine. Every UI state the buyer can be in is
+// explicit, which keeps the page responsive and honest under load:
 //
-//   idle ──click──▶ submitting ──202──▶ queued ──poll──▶ confirmed
+//   idle ──click──▶ submitting ──202──▶ queued ──poll──▶ reserved (→ checkout page)
 //                      │                   └──poll──▶ failed
 //                      ├──409 SOLD_OUT──▶ soldOut
 //                      ├──429/503/network──▶ retrying ──(timer)──▶ submitting
@@ -36,14 +36,15 @@ export function checkoutReducer(state, action) {
     case 'ACCEPTED':
       return {
         ...state,
-        phase: action.status === 'CONFIRMED' ? 'confirmed' : action.status === 'FAILED' ? 'failed' : 'queued',
+        phase: action.status === 'RESERVED' ? 'reserved' : action.status === 'FAILED' ? 'failed' : 'queued',
+        orderId: action.orderId,
         reservationId: action.reservationId,
         trackingUrl: action.trackingUrl,
         optimistic: true,
       };
 
     case 'STATUS':
-      if (action.status === 'CONFIRMED') return { ...state, phase: 'confirmed', orderId: action.orderId };
+      if (action.status === 'RESERVED') return { ...state, phase: 'reserved', orderId: action.orderId };
       if (action.status === 'FAILED') {
         return { ...state, phase: 'failed', optimistic: false, message: failureMessage(action.reason) };
       }
@@ -52,9 +53,9 @@ export function checkoutReducer(state, action) {
     case 'REJECTED': {
       const { code, message, retryAfter } = action;
       if (code === 'SOLD_OUT') return { ...state, phase: 'soldOut', optimistic: false, message };
-      // SALE_NOT_STARTED is transient too: the local clock may flip the button a
+      // DEAL_NOT_STARTED is transient too: the local clock may flip the button a
       // few ms before the server's clock reaches the start time.
-      const transient = ['RATE_LIMITED', 'SERVICE_UNAVAILABLE', 'NETWORK_ERROR', 'TIMEOUT', 'SALE_NOT_STARTED'].includes(code);
+      const transient = ['RATE_LIMITED', 'SERVICE_UNAVAILABLE', 'NETWORK_ERROR', 'TIMEOUT', 'DEAL_NOT_STARTED'].includes(code);
       if (transient && state.attempts <= MAX_AUTO_RETRIES) {
         return { ...state, phase: 'retrying', optimistic: false, message, retryInSec: Math.max(1, retryAfter || 2) };
       }
@@ -71,7 +72,7 @@ export function checkoutReducer(state, action) {
 
 function failureMessage(reason) {
   if (reason === 'SOLD_OUT') return 'The last units were claimed just before yours — sorry!';
-  if (reason === 'ALREADY_PURCHASED') return 'You already own one from this sale.';
+  if (reason === 'ALREADY_PURCHASED') return 'You already have an order from this deal.';
   return 'We could not complete your order. Your slot was released — you can try again.';
 }
 

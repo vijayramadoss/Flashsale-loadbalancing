@@ -6,11 +6,12 @@ import { connectMongo, disconnectMongo } from '../src/lib/mongo.js';
 import { closeRedis, createRedis, getRedis, waitForRedis } from '../src/lib/redis.js';
 import { User } from '../src/models/User.js';
 import { Product } from '../src/models/Product.js';
-import { FlashSale } from '../src/models/FlashSale.js';
+import { Deal } from '../src/models/Deal.js';
 import { Order } from '../src/models/Order.js';
 import { signToken } from '../src/services/authService.js';
-import { createSale, clearSaleListCache } from '../src/services/saleService.js';
+import { createDeal, clearDealListCache } from '../src/services/dealService.js';
 import { ensureGroup, processBatch } from '../src/services/orderWorker.js';
+import { buildApp } from '../src/app.js';
 
 export const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) FlashSaleTest/1.0';
 
@@ -24,10 +25,15 @@ let blocking;
 export async function setup() {
   await connectMongo();
   await waitForRedis(getRedis());
-  await Promise.all([User.init(), Product.init(), FlashSale.init(), Order.init()]);
+  // syncIndexes also drops indexes left over from older schema versions.
+  for (const m of [User, Product, Deal, Order]) await m.syncIndexes();
+  const app = await buildApp();
+  await app.ready();
+  return app;
 }
 
-export async function teardown() {
+export async function teardown(app) {
+  await app?.close();
   blocking?.disconnect();
   blocking = undefined;
   await closeRedis();
@@ -35,7 +41,7 @@ export async function teardown() {
 }
 
 export async function resetData() {
-  await Promise.all([User.deleteMany({}), Product.deleteMany({}), FlashSale.deleteMany({}), Order.deleteMany({})]);
+  await Promise.all([User.deleteMany({}), Product.deleteMany({}), Deal.deleteMany({}), Order.deleteMany({})]);
   const redis = getRedis();
   let cursor = '0';
   do {
@@ -43,33 +49,78 @@ export async function resetData() {
     if (found.length) await redis.del(...found);
     cursor = next;
   } while (cursor !== '0');
-  clearSaleListCache();
+  clearDealListCache();
 }
 
-export async function makeUser({ role = 'customer', name = 'Test User', email } = {}) {
+/** Small wrapper over app.inject that returns { status, body, headers }. */
+export function client(app) {
+  const call = async (method, url, { auth, body, headers = {} } = {}) => {
+    const res = await app.inject({
+      method,
+      url,
+      headers: { 'user-agent': UA, ...(auth || {}), ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...headers },
+      payload: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body),
+    });
+    let parsed = null;
+    try { parsed = res.json(); } catch { /* empty body */ }
+    return { status: res.statusCode, body: parsed, headers: res.headers };
+  };
+  return {
+    get: (url, opts) => call('GET', url, opts),
+    post: (url, body, opts = {}) => call('POST', url, { ...opts, body }),
+    put: (url, body, opts = {}) => call('PUT', url, { ...opts, body }),
+    del: (url, opts) => call('DELETE', url, opts),
+  };
+}
+
+export async function makeUser({ role = 'customer', name = 'Test User', email, withAddress = true } = {}) {
   const user = await User.create({
     name,
     email: email || `user-${new mongoose.Types.ObjectId()}@example.test`,
     passwordHash: 'not-a-real-hash',
     role,
+    addresses: withAddress
+      ? [{ label: 'Home', fullName: 'Test User', phone: '9876543210', line1: '12 MG Road', city: 'Bengaluru', state: 'Karnataka', pincode: '560001', isDefault: true }]
+      : [],
   });
-  return { user, token: signToken(user), auth: { Authorization: `Bearer ${signToken(user)}`, 'User-Agent': UA } };
+  return { user, addressId: user.addresses[0]?._id.toString(), auth: { authorization: `Bearer ${signToken(user)}` } };
 }
 
-/** Synthetic buyer: a valid JWT for a fresh ObjectId, no DB round-trip (for big concurrency tests). */
+/** Synthetic buyer: a valid JWT for a fresh ObjectId, no DB write (for big concurrency tests). */
 export function syntheticBuyer() {
   const user = { _id: new mongoose.Types.ObjectId(), role: 'customer', name: 'Load Buyer' };
-  return { id: user._id.toString(), auth: { Authorization: `Bearer ${signToken(user)}`, 'User-Agent': UA } };
+  return { id: user._id.toString(), auth: { authorization: `Bearer ${signToken(user)}`, 'user-agent': UA } };
 }
 
-export async function makeSale({ stock = 10, startsInMs = -1000, durationMs = 3_600_000, priceCents = 1000 } = {}) {
+let productSeq = 0;
+export async function makeProduct({ stock = 10, priceCents = 2_000_000, mrpCents = 2_200_000, brand = 'TestBrand', name } = {}) {
+  productSeq++;
+  return Product.create({
+    slug: `test-phone-${productSeq}`,
+    brand,
+    name: name || `Test Phone ${productSeq}`,
+    tagline: 'A phone for tests',
+    variants: [
+      { sku: `TP${productSeq}-8-128-BLA`, color: 'Black', colorHex: '#111111', storage: '128 GB', ram: '8 GB', priceCents, mrpCents, stock },
+      { sku: `TP${productSeq}-8-256-WHI`, color: 'White', colorHex: '#eeeeee', storage: '256 GB', ram: '8 GB', priceCents: priceCents + 500_000, mrpCents: mrpCents + 500_000, stock },
+    ],
+    rating: 4,
+    ratingCount: productSeq * 10,
+    releaseYear: 2025,
+  });
+}
+
+export async function makeDeal({ stock = 10, startsInMs = -1000, durationMs = 3_600_000, dealPriceCents = 1_500_000, holdMinutes = 10 } = {}) {
+  const product = await makeProduct();
   const startsAt = new Date(Date.now() + startsInMs);
-  return createSale({
-    title: 'Test Sale',
+  return createDeal({
+    sku: product.variants[0].sku,
+    title: 'Test Deal',
+    dealPriceCents,
+    totalStock: stock,
     startsAt,
     endsAt: new Date(startsAt.getTime() + durationMs),
-    totalStock: stock,
-    product: { name: 'Test Phone', description: '', imageUrl: '', priceCents, currency: 'INR' },
+    holdMinutes,
   });
 }
 
@@ -87,3 +138,6 @@ export async function drainQueue(consumer = 'test-consumer') {
     total += n;
   }
 }
+
+export const card = (number = '4242424242424242') => ({ method: 'CARD', card: { number, expiry: '12/30', cvc: '123', name: 'Test User' } });
+export const idem = () => ({ 'idempotency-key': `test-${new mongoose.Types.ObjectId()}` });

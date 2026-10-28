@@ -3,11 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="Festival flash sale — limited stock, one per customer." />
-    <title>FlashSale</title>
+    <meta name="description" content="FlashSale — the latest phones, festival flash deals, fast delivery." />
+    <meta name="color-scheme" content="light dark" />
+    <title>FlashSale — Phones &amp; flash deals</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <!-- Asset pre-fetching: the hero image is requested in parallel with the JS bundle. -->
-    <link rel="preload" href="/phone.svg" as="image" type="image/svg+xml" />
+    <!-- Warm up the two API calls the home page makes first, in parallel with the JS bundle. -->
+    <link rel="preload" href="/api/deals" as="fetch" crossorigin="anonymous" />
+    <link rel="preload" href="/api/products?sort=popular&amp;limit=8" as="fetch" crossorigin="anonymous" />
   </head>
   <body>
     <div id="root"></div>

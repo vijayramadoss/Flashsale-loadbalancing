@@ -17,17 +17,16 @@
     "worker:loadtest": "node --env-file=.env --env-file=.env.loadtest src/worker.js"
   },
   "dependencies": {
+    "@fastify/compress": "^9.3.0",
+    "@fastify/helmet": "^13.2.0",
+    "@fastify/static": "^10.1.8",
     "bcryptjs": "^2.4.3",
-    "compression": "^1.8.2",
-    "express": "^5.1.0",
-    "helmet": "^8.3.0",
+    "fastify": "^5.12.7",
     "ioredis": "^5.11.1",
     "jsonwebtoken": "^9.0.3",
-    "mongoose": "^8.24.7",
-    "zod": "^4.6.7"
+    "mongoose": "^8.24.7"
   },
   "devDependencies": {
-    "autocannon": "^8.0.0",
-    "supertest": "^7.3.1"
+    "autocannon": "^8.0.0"
   }
 }

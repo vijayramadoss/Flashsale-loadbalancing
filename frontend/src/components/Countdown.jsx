@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
-import { formatCountdown } from '../lib/format.js';
+import { formatCountdown, formatMinSec } from '../lib/format.js';
 
 // Ticks locally (no network) against the SERVER clock (offset-corrected), so
-// every buyer's button unlocks at the same real moment regardless of how wrong
-// their own device clock is. Only this small component re-renders each tick.
-export default function Countdown({ target, offset, onZero }) {
+// every buyer's button unlocks at the same real moment regardless of their
+// own device clock. Only this small component re-renders each tick.
+export default function Countdown({ target, offset = 0, onZero, format = 'hms', className = 'countdown', label = 'Time remaining' }) {
   const [left, setLeft] = useState(() => target - (Date.now() + offset));
 
   useEffect(() => {
@@ -23,8 +23,8 @@ export default function Countdown({ target, offset, onZero }) {
   }, [target, offset, onZero]);
 
   return (
-    <span className="countdown" role="timer" aria-label="Time until the sale starts">
-      {formatCountdown(left)}
+    <span className={className} role="timer" aria-label={label}>
+      {format === 'ms' ? formatMinSec(left) : formatCountdown(left)}
     </span>
   );
 }

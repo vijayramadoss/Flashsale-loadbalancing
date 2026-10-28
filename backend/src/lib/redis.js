@@ -7,11 +7,12 @@ import { defineScripts } from '../redis/scripts.js';
 // obvious which key each Lua script touches. `p` namespaces all keys.
 const p = () => config.redisPrefix;
 export const keys = {
-  sale: (saleId) => `${p()}sale:${saleId}`,
-  buyers: (saleId) => `${p()}sale:${saleId}:buyers`,
+  deal: (dealId) => `${p()}deal:${dealId}`,
+  buyers: (dealId) => `${p()}deal:${dealId}:buyers`,
   reservation: (reservationId) => `${p()}res:${reservationId}`,
   orderStream: () => `${p()}orders:stream`,
   rateLimit: (bucket, id) => `${p()}rl:${bucket}:${id}`,
+  catalog: (hash) => `${p()}cache:catalog:${hash}`,
 };
 
 export const ORDER_GROUP = 'order-writers';

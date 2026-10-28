@@ -1,13 +1,15 @@
-// Order-writer process: consumes reservations from the Redis Stream and
-// persists them to MongoDB. Run one or more of these alongside the API
-// (`npm run worker`). Several workers share the load through a consumer
-// group; each message is delivered to exactly one of them.
+// Background process: (1) turns queued flash-deal reservations into pending
+// orders, (2) sweeps unpaid orders whose hold expired and returns their stock.
+// Run one or more alongside the API (`npm run worker`); several workers share
+// the queue through a consumer group, and the sweeper's conditional updates
+// make it safe for more than one worker to sweep at the same time.
 import os from 'node:os';
 import { config } from './config/env.js';
 import { connectMongo, disconnectMongo } from './lib/mongo.js';
 import { closeRedis, createRedis, getRedis, waitForRedis } from './lib/redis.js';
 import { logger } from './lib/logger.js';
 import { ensureGroup, processBatch, reclaimStale } from './services/orderWorker.js';
+import { expireDueOrders } from './services/orderService.js';
 
 const consumer = `${os.hostname()}-${process.pid}`;
 let running = true;
@@ -22,12 +24,19 @@ async function run() {
   logger.info('order worker started', { consumer });
 
   let lastReclaim = 0;
+  let lastSweep = 0;
   while (running) {
     try {
-      if (Date.now() - lastReclaim > config.worker.claimIdleMs / 2) {
-        lastReclaim = Date.now();
+      const now = Date.now();
+      if (now - lastReclaim > config.worker.claimIdleMs / 2) {
+        lastReclaim = now;
         const n = await reclaimStale(consumer);
         if (n) logger.info('reclaimed stale messages', { count: n });
+      }
+      if (now - lastSweep > config.worker.sweepIntervalMs) {
+        lastSweep = now;
+        const n = await expireDueOrders();
+        if (n) logger.info('expired unpaid orders', { count: n });
       }
       await processBatch(blocking, consumer);
     } catch (err) {
