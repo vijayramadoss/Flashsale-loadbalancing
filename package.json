@@ -11,6 +11,7 @@
     "dev:api": "npm run dev --workspace backend",
     "dev:worker": "npm run worker --workspace backend",
     "dev:web": "npm run dev --workspace frontend",
+    "setup": "node scripts/setup-env.mjs",
     "seed": "npm run seed --workspace backend --",
     "build": "npm run build --workspace frontend",
     "start": "npm run start:cluster --workspace backend",

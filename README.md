@@ -39,7 +39,7 @@ The rest is a complete store around it: catalog, cart, checkout, payments (simul
 
 **Docker (everything, one command set):**
 ```bash
-cp .env.docker.example .env      # then fill in the secrets
+npm run setup                    # creates .env files with random secrets (prints the admin login)
 docker compose up -d --build
 docker compose run --rm seed
 ```
@@ -47,7 +47,7 @@ Store `http://localhost:8080` · CDN `:8081` · Grafana `:3000`
 
 **Without Docker:** needs Node 24, MongoDB as a replica set, Redis. 
 ```bash
-npm install && npm run seed -- --fresh --starts-in-min=2
+npm install && npm run setup && npm run seed -- --fresh --starts-in-min=2
 npm run dev:api & npm run dev:worker & npm run dev:web
 ```
 
