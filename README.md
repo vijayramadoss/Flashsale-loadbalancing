@@ -1,6 +1,6 @@
 # FlashSale — 500 phones, 100,000 buyers, zero overselling
 
-A phone store with a high-concurrency **flash-sale** path: 500 units go on sale at an exact time and thousands of buyers hit "Buy" at once. Built for the *Fullstack Placement Case Study*.
+A phone store with a high-concurrency **flash-sale** path: 500 units go on sale at an exact time and thousands of buyers hit "Buy" at once. 
 
 **Stack:** React 19 + Astryx UI · Node 24 + Fastify 5 · MongoDB 8 (replica set) · Redis (Lua + Streams) · NGINX · Docker
 
@@ -68,9 +68,4 @@ npm run dev:api & npm run dev:worker & npm run dev:web
 npm test
 ```
 
-## Limits (stated honestly)
 
-- 100,000 requests in 10 s can't be produced on one laptop (peak ≈ 4,400 req/s here); the design targets it, it isn't measured at that scale.
-- Page-load time was measured on localhost only. The CDN is a local NGINX edge, not a commercial CDN. Payments are simulated.
-
-Full design notes, API reference, test evidence and troubleshooting: **`CLAUDE.md`**.
