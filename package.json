@@ -1,0 +1,21 @@
+{
+  "name": "flashsale",
+  "private": true,
+  "version": "1.0.0",
+  "description": "High-concurrency flash-sale checkout (MERN + Redis)",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev:api": "npm run dev --workspace backend",
+    "dev:worker": "npm run worker --workspace backend",
+    "dev:web": "npm run dev --workspace frontend",
+    "seed": "npm run seed --workspace backend --",
+    "build": "npm run build --workspace frontend",
+    "start": "npm run start:cluster --workspace backend",
+    "test": "npm test --workspace backend && npm test --workspace frontend",
+    "loadtest": "npm run loadtest --workspace backend --",
+    "init-replset": "npm run init-replset --workspace backend"
+  }
+}
