@@ -407,7 +407,7 @@ Load test (3 terminals, in `backend/`): `npm run start:loadtest` · `npm run wor
 - **Provided, not verified:** NGINX load balancer/edge config, CDN deployment (R14/R16 infrastructure halves).
 - **Not started:** none of the mandatory items. Optional ideas: SSE for sale status, CAPTCHA, httpOnly-cookie auth, Docker Compose, Lighthouse/throttled TTI measurement.
 - **Failing tests / known bugs:** none.
-- **Pending decisions:** none blocking. Consider `git init` + first commit.
+- **Pending decisions:** none blocking. Git repository initialised on branch `main` (initial commit `5dd1b7b`); no remote configured.
 - **Next recommended action:** free space on C:, then optionally verify `infra/nginx.conf` with Docker; run the throttled TTI measurement.
 
 ## 16. Study Guide
@@ -443,5 +443,6 @@ Load test (3 terminals, in `backend/`): `npm run start:loadtest` · `npm run wor
 - Tests: 36/36 pass; build within budget; 3 load tests pass integrity checks; browser journeys verified.
 - Decisions: Redis Streams instead of RabbitMQ; one unit per user; adaptive polling; JWT; Mongo on port 27018 with own data dir.
 - Fixes: E1–E8 (§12).
-- Outstanding: NGINX/CDN unverified; real-network TTI unmeasured; no git repository yet.
+- Outstanding: NGINX/CDN unverified; real-network TTI unmeasured.
+- Git: initialised `main`, initial commit `5dd1b7b` (71 files; `backend/.env`, `node_modules`, `dist`, `.data` excluded).
 - Next: free C: space; optional Docker/NGINX verification.
