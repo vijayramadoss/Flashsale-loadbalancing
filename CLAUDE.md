@@ -5,7 +5,7 @@
 > Frontend: React 19 + **Astryx** design system (`@astryxdesign/core` 0.7.4, pinned — it is a 0.x beta); import components per entry (`@astryxdesign/core/Button`); Astryx inputs call `onChange(value, event)`; boolean props are `is*`/`has*`; spacing props take numbers (`gap={4}`). Use theme tokens (`var(--color-…)`) in CSS; colour is only a hint.
 > Tests run against real MongoDB + Redis (§6). **The C: drive on this machine is full — keep npm cache / TEMP on E: (§12 E1).**
 
-Status (2026-10-28, session 2): **full storefront implemented and verified end to end** (browse → product → cart → address → delivery → payment → confirmation → orders → cancel; flash-deal reserve → hold → pay; admin fulfilment). NGINX/CDN remain *provided, not verified*. See §3, §11, §15.
+Status (2026-10-29, session 5): storefront, flash deals, LB (NGINX → 3 replicas), **local CDN edge** and the **full Docker stack** are implemented and verified (§19–§22). Docker's data disk lives on **E:\DockerDesktopWSL**; start Docker with `infra/start-docker-desktop.ps1` (§22).
 
 ---
 
@@ -54,7 +54,7 @@ Reference solution: UI lock on first click, CDN assets, polling/SSE · LB → st
 | A4 | Per-user limit | 1 unit per customer per deal (Redis buyers hash + unique `activeDealKey` index) |
 | A5 | "Bundle < 200 KB" | **Transfer size** of the initial JS+CSS, measured as the Brotli files actually served (raw/gzip reported too). Changed from raw in session 2: Astryx ships one prebuilt 220 KB stylesheet |
 | A6 | 100k req / 10 s | Not reproducible on one laptop; strongest local tests reported honestly |
-| A7 | CDN / NGINX | Hashed immutable assets + precompressed Brotli implemented; `infra/nginx.conf` unverified |
+| A7 | CDN / NGINX | No cloud CDN account → a **local CDN edge** (second NGINX, pull-through cache on its own origin) in front of the origin, locally and in Docker (§22) |
 | A8 | Auth | Email/password + JWT; roles customer/admin |
 | A9 | Polling vs SSE/WebSockets | Adaptive, jittered polling of a 1-s cacheable endpoint (§16) |
 | A10 | Payments (user chose) | **Simulated gateway** (§10) — realistic validation, declines, idempotency; no real money |
@@ -81,7 +81,7 @@ Legend: **Verified** = implemented + evidence in §11.
 | R11 | UI lock on first click | `useRef` lock + disabled button + server idempotency | browser: 5 same-tick clicks → 1 request | **Verified** |
 | R12 | Graceful loading/queued/failed states | state machine `lib/checkout.js`, skeletons, banners, retries, 8 s timeouts | lib.test; browser | **Verified** |
 | R13 | Optimistic UI | instant "Reserving…/Securing your unit…" | lib.test | **Verified** |
-| R14 | Asset pre-fetching / CDN-ready assets | `<link rel=preload>` for first API calls, idle route-chunk prefetch, hashed immutable assets, precompressed `.br/.gz` | browser resource timing; `curl` shows `content-encoding: br` | **Verified** (CDN itself not deployed) |
+| R14 | Asset pre-fetching / CDN | `<link rel=preload>` for first API calls, idle route-chunk prefetch, hashed immutable assets, precompressed `.br/.gz`; **CDN edge** `infra/cdn.local.conf` / `infra/docker/cdn.conf`, `build:cdn` (`CDN_URL`) | `scripts/cdn-check.js` 17/17 local + 17/17 Docker; browser: all JS/CSS from the CDN origin | **Verified (local CDN edge)**; no commercial CDN |
 | R15 | Bundle < 200 KB, TTI < 1.5 s | route code-splitting, lean shell, budget gate | 170 KB Brotli; localhost warm DOM-interactive 42 ms | **Verified** (no real-network TTI) |
 | R16 | Load balancing | `cluster.js`; **NGINX 1.28 in front of 3 replicas** (`infra/nginx.local.conf`, `start-lb-demo.ps1`); per-replica stats (`plugins/traffic.js`, admin Traffic tab) | 10,000-user simulation: 8,250 / 8,402 / 8,213 requests per replica (§19) | **Verified (local NGINX)**; production `infra/nginx.conf` still unverified |
 | R17 | Auth & authorization | bcrypt + JWT, `requireAdmin`, ownership checks | auth.test, orders.test 404/403 | **Verified** |
@@ -332,6 +332,10 @@ Same tests on Express (session 1): 1,796–2,319 req/s, p99 232–458 ms → Fas
 | E18 | NGINX "1024 worker_connections are not enough"; simulator process died (0xC0000409) | Windows NGINX = 1 worker with select() (≤ 1,024 sockets, client + upstream) → simulator pool lowered from 800 to 400 sockets; run with `--report-on-fatalerror` |
 | E20 | Declined payment in the web checkout jumped to the order page | checkout used a copy of the order fetched while the payment was PROCESSING (`canPay` false) → "closed" now means status ≠ PENDING_PAYMENT, and the order is re-fetched after a failed payment |
 | E21 | 62 of 10,000 simulated shoppers timed out waiting for payment | local NGINX rate-limited the gateway's webhooks (812 × 429, all from one address); retries + reconciliation healed it, but the webhook path is now exempt (signature-checked in the API). Rerun: 0 webhook 429s, 0 errors |
+| E22 | Docker Desktop would not start (C: full) | 19.3 GB `docker_data.vhdx` on C: → copied to `E:\DockerDesktopWSL\disk` (robocopy, sizes equal), `wsl --manage docker-desktop --move E:\DockerDesktopWSL\main`, `CustomWslDistroDir` in `%APPDATA%\Docker\settings-store.json` (written **without BOM**); after confirming the E: copy was the one mounted, the C: copy was deleted with the user's approval → C: 0 → 21 GB free |
+| E23 | Docker Desktop crashed on every start: `remove …\Docker\run\sailor-ingest.sock: The file cannot be accessed by the system` (also `docker-secrets-engine\engine.sock`) | AF_UNIX socket files left by a crashed start cannot be deleted on this Windows build (error 1920, even with `fsutil`) → rename the folders aside; `infra/start-docker-desktop.ps1` does this before every start |
+| E24 | `web` container: "failed to set up container networking: Address already in use" | its fixed IP 172.28.0.10 had been handed to another container → compose network `ip_range: 172.28.1.0/24` for automatic addresses |
+| E25 | Host port 8080 already taken (a Java program) | published ports configurable: `WEB_PORT`, `CDN_PORT` / `CDN_URL`, `GRAFANA_PORT` in `.env` (this laptop: 8085 / 8081 / 3000) |
 | E19 | Client-side per-replica split looked lopsided | cached/stale responses keep the original replica's `X-Served-By` → trust the server-side Traffic counters; the simulator labels `X-Cache: HIT` as nginx-cache |
 
 ## 13. Commands
@@ -362,6 +366,7 @@ Questions: (1) Why can't the deal oversell even if Redis is wrong? (2) What stop
 
 ## 17. Change Log
 **Session 1 (2026-10-28)** — MERN flash-sale checkout (Express), Redis Lua + Streams, tests, load tests (see git `5dd1b7b`).
+**Session 5 (2026-10-29)** — Local CDN edge (pull-through NGINX cache on its own origin: per-encoding variants, request collapsing, stale-on-error, CORS) + `build:cdn` + `cdn-check.js`; origin NGINX serves Brotli; CSP allows `CDN_URL`. Docker moved to E: and **actually run**: 11 containers + seed, smoke 32/32 (+ Prometheus targets 3/3 up), CDN 17/17, browser OK. Fixes E22–E25. See §22.
 **Session 4 (2026-10-29)** — Gateway-style payments (intents, HMAC-signed webhooks, retries, reconciliation, async refunds), coupons, verified reviews, wishlist, returns, GST invoices, waiting room + proof-of-work, admin catalog editor, Prometheus `/metrics`; Docker (2 Dockerfiles, compose with Valkey/Mongo/3 APIs/2 workers/NGINX/Prometheus/Grafana); `smoke-test.js`. Tests 65/65, smoke 33/33, 10k simulation all checks. Fixes E20–E21. See §21. **No UI was added for coupons/reviews/wishlist/returns/invoices/waiting room — API only, by request.**
 **Session 3 (2026-10-28)** — Real NGINX (1.28 Windows build in `E:\tools`) in front of 3 API replicas + 2 workers; replica identity (`REPLICA_ID`, `X-Served-By`), per-replica traffic counters and admin **Traffic** tab; `simulate-users.js` (10,000 accounts walking the real journey). Fixes E17–E19. Result in §19.
 **Session 2 (2026-10-28)** — Full storefront redesign: Fastify migration; Product/Deal/Order/User models redesigned; catalog (10 phones), cart quote, cart orders with transactional stock holds, simulated payments with idempotency, cancellation/refund, hold-expiry sweeper, address book, admin fulfilment; React 19 + Astryx neutral UI (12 screens), route splitting, precompressed assets; 44 tests; load tests ≈2× Express; browser E2E. Fixes E9–E16. Decisions A5, A10–A13.
@@ -477,8 +482,8 @@ E:/tools/redis/redis-cli.exe XPENDING fssim:orders:stream order-writers
 4. **Failover (verified):** stop api-2 while sending requests → `api-1=15 api-3=15, errors=0`; NGINX logs `upstream server temporarily disabled`; restart api-2 → after `fail_timeout` (5 s) it rejoins: `api-1=11 api-2=10 api-3=9`. Caveat: on Windows a dead port *times out* (2 s `proxy_connect_timeout`) instead of refusing, so the first request after the failure is slow but succeeds. Production: lower the connect timeout and add active health checks (NGINX Plus / ALB target-group health checks / Kubernetes readiness on `/api/health/ready`).
 5. **No shared memory between replicas (why it is safe):** the simulation's invariant checks (500 reserved, Mongo = Redis, no oversell) passed with all three replicas admitting buyers concurrently.
 
-### C. "CDN" — what is implemented and how to verify it
-There is **no real CDN deployed**. What is implemented is everything a CDN needs, with NGINX playing the edge locally:
+### C. CDN — how to verify it
+Session 5 added a CDN *edge* on its own origin (§22 — run `node scripts/cdn-check.js`). The origin-side checks below still apply:
 | Check | Command | Expected (observed) |
 |---|---|---|
 | Fingerprinted assets cached for a year | `curl -sI http://127.0.0.1:8088/assets/index-<hash>.js` | `Cache-Control: public, max-age=31536000, immutable` ✔ |
@@ -513,7 +518,7 @@ There is **no real CDN deployed**. What is implemented is everything a CDN needs
 
 **Waiting room math:** join before T-0 → random score (fair lottery); after T-0 → behind everyone. Position *r* is admitted at `startsAt + r / releasePerSec` — computed, no background job, every replica agrees. Admission = 2-minute JWT bound to user + deal. **Proof-of-work:** signed, expiring, single-use challenge; client finds a nonce with N leading zero bits of SHA-256 (N=16 ≈ 65k hashes; 157–380 ms measured in Node); verification is one hash.
 
-### Docker (files written + validated; not run — the Docker daemon needs space on C:)
+### Docker (run and verified in session 5, see §22)
 ```bash
 cp .env.docker.example .env
 ```
@@ -531,7 +536,7 @@ Store http://localhost:8080 · Grafana http://localhost:3000 (dashboard "FlashSa
 | `docker-compose.yml` | mongo:8.0 + `mongo-init` (replica set), valkey:8.1 (password, AOF), api-1..3, worker-1..2, web (NGINX :8080), prometheus, grafana; private network 172.28.0.0/16 (only web + grafana published); `seed` under profile `tools` |
 | `infra/prometheus/prometheus.yml`, `infra/grafana/…` | scrape config, datasource + 6-panel dashboard |
 | `.env.docker.example` | secrets template (never commit `.env`) |
-Validation done: `docker compose config` ✔ (11 services + seed), container NGINX config passes `nginx -t` (with hostnames/paths mapped locally) ✔, dashboard JSON ✔. **Not done:** `docker build` / `up` (needs the daemon). To run it: free space on C:, or in Docker Desktop → Settings → Resources → Disk image location, choose E:. MongoDB in compose has no auth (private network only); Valkey requires a password.
+MongoDB in compose has no auth (private network only); Valkey requires a password.
 
 ### Verification (2026-10-29)
 | Check | Result |
@@ -546,3 +551,51 @@ Run the smoke test yourself (LB demo running):
 ```bash
 cd backend && node --env-file=.env --env-file=.env.sim scripts/smoke-test.js
 ```
+
+## 22. Session 5: Local CDN Edge and Docker on E:
+
+### CDN edge (local stand-in for CloudFront / Cloudflare)
+```
+browser ──HTML + /api──▶ origin NGINX :8088 (Docker: web :8085) ──▶ api-1..3
+   └──/assets/*──▶ CDN edge :8090 (Docker: cdn :8081) ──(miss only)──▶ origin
+```
+| Piece | What it does |
+|---|---|
+| `frontend/vite.config.js` | `CDN_URL` (or `vite build --mode cdn` → `http://127.0.0.1:8090`) → `experimental.renderBuiltUrl` makes **every** built asset URL absolute on the CDN (entry, CSS, lazy chunks, favicon); HTML + `/api` stay on the site |
+| `npm run build:cdn` (frontend) | CDN build + precompress + bundle gate (`check-bundle.js` now also matches absolute CDN URLs) |
+| `infra/cdn.local.conf`, `infra/docker/cdn.conf` | NGINX `proxy_cache` edge: honours origin `Cache-Control` (1 y immutable), cache key `uri + args + normalised encoding` (br / gzip / none), `proxy_cache_lock` (collapses misses), `use_stale` on origin errors, revalidation, strips cookies, `X-Cache` + `X-CDN-Edge`, CORS `*` (module scripts are `crossorigin`), `Timing-Allow-Origin`; refuses `/api`, `/`, non-GET |
+| `infra/nginx.local.conf`, `infra/docker/nginx.conf` | origin serves the precompressed **Brotli** files (`Accept-Encoding: br` and `.br` exists → internal rewrite, per-type `default_type`, `infra/br-headers.conf`), else gzip_static |
+| backend `CDN_URL` | helmet CSP adds the CDN origin to script/style/img/font-src when Fastify serves the HTML |
+| `scripts/cdn-check.js [--site=…]` | finds the CDN from index.html like a browser does and checks it (17 checks) |
+| `start-lb-demo.ps1` / `stop-lb-demo.ps1` | also start / stop the local edge |
+
+No purge API is needed: every deploy produces new content-hashed file names; HTML is `no-cache`.
+
+### Docker on E:
+Data disk `E:\DockerDesktopWSL\disk\docker_data.vhdx`, distro `E:\DockerDesktopWSL\main` (E22). Start Docker Desktop with:
+```bash
+powershell -ExecutionPolicy Bypass -File infra/start-docker-desktop.ps1
+```
+Then (root `.env` from `.env.docker.example`; this laptop uses `WEB_PORT=8085`):
+```bash
+docker compose up -d --build
+```
+```bash
+docker compose run --rm seed
+```
+Store http://localhost:8085 · CDN http://localhost:8081 · Grafana http://localhost:3000 (user `admin`, password `GRAFANA_ADMIN_PASSWORD` from `.env`). Store admin: `ADMIN_EMAIL` / `ADMIN_PASSWORD` from the root `.env`.
+
+On another laptop: clone, `npm install`, copy `.env.docker.example` → `.env` and fill in secrets, then the two compose commands (Docker builds the frontend itself).
+
+### Verification (2026-10-29, real runs)
+| Check | Result |
+|---|---|
+| Local CDN (`cdn-check.js`, site :8088 → edge :8090) | **17/17**: MISS→HIT, Brotli 139.8 KB entry / 30.3 KB CSS, gzip variant, 200 cold concurrent → **1 MISS + 199 HIT**, `/api` 404, POST 403 |
+| Docker build + up | 2 images built (bundle gate passed inside the build), **11 containers** up, api-1..3 healthy, seed OK |
+| Docker smoke test (`--base=http://localhost:8085 --metrics=skip`) | **32/32** (all flows incl. webhooks through the web container, waiting room + PoW 16 bits 118 ms, deal consistency, multi-replica) |
+| Docker metrics | Prometheus targets api-1/2/3 **up**; `flashsale_http_requests_total` per replica 38 / 34 / 32; Grafana `/api/health` ok |
+| Docker CDN (`cdn-check.js --site=http://localhost:8085`) | **17/17** (edge `docker-edge-1`, 1 MISS + 199 HIT) |
+| Browser (built-in) http://localhost:8085 | storefront renders; every JS/CSS resource loaded from `localhost:8081` (entry 143.5 KB transferred); DOM interactive 200 ms (cold) |
+| `npm test` | backend **56/56**, frontend **9/9** |
+
+The edge throughput printed by the checker (187–220 req/s for the 140 KB entry at 50 concurrent) includes Node's Brotli decoding in the checker on the same laptop — it is not a CDN capacity figure.

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build && node scripts/precompress.js && node scripts/check-bundle.js",
+    "build:cdn": "vite build --mode cdn && node scripts/precompress.js && node scripts/check-bundle.js",
     "preview": "vite preview",
     "test": "node --test \"src/lib/*.test.js\""
   },

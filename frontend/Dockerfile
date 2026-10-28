@@ -8,11 +8,15 @@ COPY backend/package.json backend/
 COPY frontend/package.json frontend/
 RUN npm ci --workspace frontend --no-audit --no-fund
 COPY frontend ./frontend
+# CDN origin for the static assets (empty = served by this container itself).
+ARG CDN_URL=""
+ENV CDN_URL=$CDN_URL
 # vite build → precompress (.gz/.br) → bundle budget gate (fails the build if > 200 KB)
 RUN npm run build --workspace frontend
 
 FROM nginx:1.28-alpine
 COPY infra/docker/nginx.conf /etc/nginx/nginx.conf
+COPY infra/br-headers.conf /etc/nginx/br-headers.conf
 COPY --from=build /app/frontend/dist /usr/share/nginx/html
 EXPOSE 80
 HEALTHCHECK --interval=10s --timeout=3s CMD wget -qO- http://127.0.0.1/healthz || exit 1

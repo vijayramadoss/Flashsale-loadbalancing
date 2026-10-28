@@ -76,6 +76,8 @@ export const config = {
   },
   returnWindowDays: num(process.env.RETURN_WINDOW_DAYS, 7),
   metricsToken: process.env.METRICS_TOKEN || '',
+  // Origin the storefront's static assets are served from (a CDN), allowed in the CSP. Empty = same origin.
+  cdnOrigin: process.env.CDN_URL ? new URL(process.env.CDN_URL).origin : '',
 
   // Seconds a catalog listing is cached in Redis (shared by every replica).
   catalogCacheSec: num(process.env.CATALOG_CACHE_SEC, 30),

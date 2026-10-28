@@ -1,6 +1,7 @@
 # Full FlashSale stack in containers.
 #
 #   browser ──▶ web (NGINX :8080) ──▶ api-1 / api-2 / api-3 ──▶ valkey (Redis-compatible)  +  mongo (replica set)
+#      └─ JS/CSS ──▶ cdn (NGINX edge cache :8081) ──(miss only)──▶ web
 #                                                   ▲                ▲
 #                               worker-1 / worker-2 ┘  prometheus ──┘ (scrapes /metrics) ──▶ grafana :3000
 #
@@ -8,9 +9,9 @@
 #   cp .env.docker.example .env        # then fill in the secrets
 #   docker compose up -d --build
 #   docker compose run --rm seed       # admin + phone catalog + a flash deal
-#   open http://localhost:8080          (Grafana: http://localhost:3000)
+#   open http://localhost:8080          (assets from the CDN edge http://localhost:8081; Grafana: http://localhost:3000)
 #
-# Only `web` and `grafana` publish ports; databases and APIs stay on the private network.
+# Only `web`, `cdn` and `grafana` publish ports; databases and APIs stay on the private network.
 
 x-api-env: &api-env
   NODE_ENV: production
@@ -109,16 +110,34 @@ services:
     environment: { <<: *api-env, REPLICA_ID: seed }
 
   web:
-    build: { context: ., dockerfile: frontend/Dockerfile }
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      # Where browsers fetch the built assets from (the `cdn` edge below). Empty → served by web itself.
+      args: { CDN_URL: "${CDN_URL-http://localhost:8081}" }
     image: flashsale-web:latest
     restart: unless-stopped
-    ports: ["8080:80"]
+    ports: ["${WEB_PORT:-8080}:80"]
     networks:
       backend: { ipv4_address: 172.28.0.10 }
     depends_on:
       api-1: { condition: service_healthy }
       api-2: { condition: service_healthy }
       api-3: { condition: service_healthy }
+
+  # CDN edge: pull-through cache for the storefront's static assets (infra/docker/cdn.conf).
+  cdn:
+    image: nginx:1.28-alpine
+    restart: unless-stopped
+    ports: ["${CDN_PORT:-8081}:80"]
+    networks: [backend]
+    volumes:
+      - ./infra/docker/cdn.conf:/etc/nginx/nginx.conf:ro
+    depends_on: [web]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
 
   prometheus:
     image: prom/prometheus:v3.5.0
@@ -132,7 +151,7 @@ services:
   grafana:
     image: grafana/grafana:12.1.0
     restart: unless-stopped
-    ports: ["3000:3000"]
+    ports: ["${GRAFANA_PORT:-3000}:3000"]
     networks: [backend]
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
@@ -148,6 +167,8 @@ networks:
     ipam:
       config:
         - subnet: 172.28.0.0/16
+          # Automatic addresses come from 172.28.1.x, so web's fixed 172.28.0.10 is never taken.
+          ip_range: 172.28.1.0/24
 
 volumes:
   mongo-data:

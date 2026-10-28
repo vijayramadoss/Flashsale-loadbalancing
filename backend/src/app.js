@@ -35,7 +35,14 @@ export async function buildApp() {
     ajv: { customOptions: { allErrors: true, removeAdditional: false } },
   });
 
-  await app.register(helmet, { crossOriginEmbedderPolicy: false });
+  // Helmet's default CSP only allows same-origin scripts; a CDN build loads them from config.cdnOrigin.
+  const cdn = config.cdnOrigin ? [config.cdnOrigin] : [];
+  await app.register(helmet, {
+    crossOriginEmbedderPolicy: false,
+    contentSecurityPolicy: cdn.length
+      ? { directives: { scriptSrc: ["'self'", ...cdn], styleSrc: ["'self'", 'https:', "'unsafe-inline'", ...cdn], imgSrc: ["'self'", 'data:', ...cdn], fontSrc: ["'self'", 'https:', 'data:', ...cdn] } }
+      : true,
+  });
   await app.register(compress, { threshold: 1024, global: true });
   app.setErrorHandler(errorHandler);
   await app.register(trafficPlugin);

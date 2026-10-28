@@ -16,7 +16,8 @@ const BUDGET_BYTES = 200 * 1024;
 const dist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../dist');
 const html = fs.readFileSync(path.join(dist, 'index.html'), 'utf8');
 
-const initial = new Set([...html.matchAll(/(?:src|href)="\/(assets\/[^"]+\.(?:js|css))"/g)].map((m) => m[1]));
+// Asset URLs are site-relative ("/assets/…") or absolute on the CDN ("http://cdn…/assets/…").
+const initial = new Set([...html.matchAll(/(?:src|href)="(?:https?:\/\/[^"]+?)?\/(assets\/[^"]+\.(?:js|css))"/g)].map((m) => m[1]));
 const all = fs.readdirSync(path.join(dist, 'assets')).filter((f) => /\.(js|css)$/.test(f)).map((f) => `assets/${f}`);
 
 const size = (file) => {

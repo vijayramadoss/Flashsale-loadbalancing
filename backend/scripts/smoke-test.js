@@ -186,8 +186,13 @@ const forged = await call('POST', '/api/webhooks/gateway', { body: { id: 'evt_fo
 check('forged webhook rejected (401)', forged.status === 401);
 const botBlocked = await fetch(`${BASE}/api/deals/${dealId}/reserve`, { method: 'POST', headers: { 'User-Agent': 'curl/8.0' } });
 check('bot user-agent blocked', botBlocked.status === 403);
-const metrics = await fetch('http://127.0.0.1:4001/metrics').then((r) => r.text()).catch(() => '');
-check('replica /metrics in Prometheus format', /flashsale_http_requests_total\{/.test(metrics) && /flashsale_queue_backlog/.test(metrics));
+// Replicas are internal; the LB demo exposes api-1 on :4001. In Docker they are not published
+// (pass --metrics=skip and check Prometheus's targets instead, §22).
+const METRICS = (process.argv.find((a) => a.startsWith('--metrics=')) || '--metrics=http://127.0.0.1:4001/metrics').slice(10);
+if (METRICS !== 'skip') {
+  const metrics = await fetch(METRICS).then((r) => r.text()).catch(() => '');
+  check('replica /metrics in Prometheus format', /flashsale_http_requests_total\{/.test(metrics) && /flashsale_queue_backlog/.test(metrics));
+}
 check(`requests were served by several replicas (${[...replicas].sort().join(', ')})`, replicas.size >= 2);
 
 const passed = results.filter(Boolean).length;
