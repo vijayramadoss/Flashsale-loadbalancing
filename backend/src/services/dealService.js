@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import { Deal } from '../models/Deal.js';
 import { Product, variantLabel } from '../models/Product.js';
-import { ACTIVE_STATUSES, Order } from '../models/Order.js';
+import { DEAL_SOLD_STATUSES, Order } from '../models/Order.js';
 import { getRedis, keys, ORDER_GROUP } from '../lib/redis.js';
 import { AppError, badRequest, notFound } from '../lib/errors.js';
 import { invalidateCatalogCache } from './catalogService.js';
@@ -25,7 +25,7 @@ function dealState({ stock, startsAt, endsAt }, now) {
 export async function primeDeal(dealDoc) {
   const deal = dealDoc.product?.name ? dealDoc : await Deal.findById(dealDoc._id).populate('product');
   const variant = deal.product.variants.find((v) => v.sku === deal.sku);
-  const orders = await Order.find({ deal: deal._id, status: { $in: ACTIVE_STATUSES } }, { user: 1, reservationId: 1 }).lean();
+  const orders = await Order.find({ deal: deal._id, status: { $in: DEAL_SOLD_STATUSES } }, { user: 1, reservationId: 1 }).lean();
   const buyers = Object.fromEntries(orders.map((o) => [o.user.toString(), o.reservationId]));
   const meta = {
     total: String(deal.totalStock),
@@ -42,6 +42,8 @@ export async function primeDeal(dealDoc) {
     design: deal.product.design,
     variantLabel: variant ? variantLabel(variant) : deal.sku,
     colorHex: variant?.colorHex || '#888888',
+    wrEnabled: deal.waitingRoom?.enabled ? '1' : '0',
+    wrRate: String(deal.waitingRoom?.releasePerSec || 100),
   };
   return getRedis().fsPrime(keys.deal(deal._id), keys.buyers(deal._id), String(deal.remainingStock), JSON.stringify(meta), JSON.stringify(buyers));
 }
@@ -80,6 +82,7 @@ export async function getDealStatus(dealId) {
     endsAt: new Date(s.endsAt).toISOString(),
     state: dealState(s, now),
     serverTime: new Date(now).toISOString(),
+    waitingRoom: { enabled: h.wrEnabled === '1', releasePerSec: Number(h.wrRate || 100) },
   };
 }
 
@@ -99,7 +102,7 @@ export const clearDealListCache = () => {
 
 // ---------- admin ----------
 
-export async function createDeal({ sku, title, dealPriceCents, totalStock, startsAt, endsAt, holdMinutes = 10 }) {
+export async function createDeal({ sku, title, dealPriceCents, totalStock, startsAt, endsAt, holdMinutes = 10, waitingRoom }) {
   const product = await Product.findOne({ 'variants.sku': sku });
   if (!product) throw badRequest('Unknown SKU', [{ field: 'sku', message: 'No product variant has this SKU' }]);
   const variant = product.variants.find((v) => v.sku === sku);
@@ -117,6 +120,7 @@ export async function createDeal({ sku, title, dealPriceCents, totalStock, start
     dealPriceCents,
     mrpCents: variant.mrpCents,
     holdMinutes,
+    waitingRoom: waitingRoom || { enabled: false },
   });
   deal.product = product;
   await primeDeal(deal);
@@ -138,15 +142,16 @@ export async function getDealStats(dealId) {
   const deal = await Deal.findById(dealId).populate('product', 'name');
   if (!deal) throw notFound('Deal not found');
   const redis = getRedis();
-  const [stock, holders, byStatus, backlog, pending] = await Promise.all([
+  const [stock, holders, byStatus, backlog, pending, waiting] = await Promise.all([
     redis.hget(keys.deal(dealId), 'stock'),
     redis.hlen(keys.buyers(dealId)),
     Order.aggregate([{ $match: { deal: deal._id } }, { $group: { _id: '$status', n: { $sum: 1 } } }]),
     redis.xlen(keys.orderStream()),
     redis.xpending(keys.orderStream(), ORDER_GROUP).catch(() => [0]),
+    redis.zcard(keys.waitingRoom(dealId)),
   ]);
   const count = Object.fromEntries(byStatus.map((s) => [s._id, s.n]));
-  const active = ACTIVE_STATUSES.reduce((n, s) => n + (count[s] || 0), 0);
+  const active = DEAL_SOLD_STATUSES.reduce((n, s) => n + (count[s] || 0), 0);
   const held = deal.totalStock - deal.remainingStock;
   return {
     id: deal._id.toString(),
@@ -159,7 +164,7 @@ export async function getDealStats(dealId) {
     totalStock: deal.totalStock,
     orders: {
       pendingPayment: count.PENDING_PAYMENT || 0,
-      paid: (count.CONFIRMED || 0) + (count.SHIPPED || 0) + (count.DELIVERED || 0),
+      paid: (count.CONFIRMED || 0) + (count.SHIPPED || 0) + (count.DELIVERED || 0) + (count.RETURNED || 0),
       expired: count.EXPIRED || 0,
       cancelled: count.CANCELLED || 0,
     },
@@ -167,6 +172,7 @@ export async function getDealStats(dealId) {
     redis: { remainingTokens: stock === null ? null : Number(stock), reservationHolders: holders },
     // Processed messages are deleted, so the stream length is the unprocessed backlog (all deals).
     queue: { backlog, pendingUnacked: Number(pending?.[0] ?? 0) },
+    waitingRoom: { enabled: Boolean(deal.waitingRoom?.enabled), releasePerSec: deal.waitingRoom?.releasePerSec, size: waiting },
     consistency: {
       oversold: active > deal.totalStock,
       countersMatchOrders: held === active && deal.soldCount === active,
@@ -188,7 +194,7 @@ export async function resetDeal(dealId, { startsAt, endsAt } = {}, { isProductio
   if (startsAt) deal.startsAt = startsAt;
   if (endsAt) deal.endsAt = endsAt;
   await deal.save();
-  await getRedis().del(keys.deal(dealId), keys.buyers(dealId));
+  await getRedis().del(keys.deal(dealId), keys.buyers(dealId), keys.waitingRoom(dealId));
   await primeDeal(deal);
   clearDealListCache();
   await invalidateCatalogCache();

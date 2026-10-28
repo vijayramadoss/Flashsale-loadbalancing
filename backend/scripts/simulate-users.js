@@ -205,24 +205,28 @@ async function shopper(u, i) {
   if (Math.random() < ABANDON) return void funnel.abandoned++;
   await call('PUT', `/api/orders/${orderId}/shipping`, { ...auth, body: { addressId, deliveryMethod: Math.random() < 0.3 ? 'EXPRESS' : 'STANDARD' }, step: 'checkout: shipping' });
   await sleep(rand(500, 2500));
+  // Like the real checkout: POST /pay → 202 PROCESSING → poll the payment until the
+  // gateway's webhook has decided (CAPTURED / FAILED).
+  const pay = async (body, key) => {
+    const r = await call('POST', `/api/orders/${orderId}/pay`, { ...auth, body, headers: { 'Idempotency-Key': key }, step: 'pay' });
+    if (r.status !== 202) return r.status === 200 ? 'CAPTURED' : 'ERROR';
+    for (let n = 0; n < 60; n++) {
+      await sleep(500);
+      const q = await call('GET', `/api/payments/${r.body.payment.id}`, { ...auth, step: 'payment poll' });
+      if (q.body?.payment && q.body.payment.status !== 'PROCESSING') return q.body.payment.status;
+    }
+    return 'TIMEOUT';
+  };
   let declined = false;
   if (Math.random() < DECLINE) {
-    const d = await call('POST', `/api/orders/${orderId}/pay`, {
-      ...auth,
-      body: { method: 'CARD', card: { number: '4000000000000002', expiry: '12/30', cvc: '123', name: u.name } },
-      headers: { 'Idempotency-Key': `sim-${i}-decline` },
-      step: 'pay',
-    });
-    declined = d.status === 402;
+    declined = (await pay({ method: 'CARD', card: { number: '4000000000000002', expiry: '12/30', cvc: '123', name: u.name } }, `sim-${i}-decline`)) === 'FAILED';
     await sleep(rand(500, 1500));
   }
-  const p = await call('POST', `/api/orders/${orderId}/pay`, {
-    ...auth,
-    body: declined ? { method: 'UPI', upi: { vpa: `shopper${i}@okbank` } } : { method: 'CARD', card: { number: '4242424242424242', expiry: '12/30', cvc: '123', name: u.name } },
-    headers: { 'Idempotency-Key': `sim-${i}-pay` },
-    step: 'pay',
-  });
-  if (p.status === 200) {
+  const result = await pay(
+    declined ? { method: 'UPI', upi: { vpa: `shopper${i}@okbank` } } : { method: 'CARD', card: { number: '4242424242424242', expiry: '12/30', cvc: '123', name: u.name } },
+    `sim-${i}-pay`,
+  );
+  if (result === 'CAPTURED') {
     funnel.paid++;
     if (declined) funnel.declinedThenPaid++;
   } else funnel.errors++;
@@ -266,6 +270,7 @@ console.log('Database truth:', { paidOrders: paidDb, pendingOrders: pending, mon
 
 const checks = [
   ['no network errors / 5xx', stats.netErrors === 0 && !Object.keys(stats.byStatus).some((c) => Number(c) >= 500)],
+  ['no shopper hit an unexpected error', funnel.errors === 0],
   [`exactly ${STOCK} units reserved`, funnel.reserved === STOCK && paidDb + pending === STOCK],
   ['paid + abandoned (still held) = reserved', paidDb === funnel.paid && pending === funnel.abandoned],
   ['MongoDB and Redis agree, nothing oversold', s.mongo.remainingStock === 0 && s.redis.remainingTokens === 0 && !s.consistency.oversold && s.consistency.countersMatchOrders],

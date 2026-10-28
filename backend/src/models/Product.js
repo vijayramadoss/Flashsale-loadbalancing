@@ -44,6 +44,8 @@ const productSchema = new mongoose.Schema(
     minPriceCents: { type: Number, min: 0 },
     rating: { type: Number, min: 0, max: 5, default: 0 },
     ratingCount: { type: Number, min: 0, default: 0 },
+    // Sum of all star ratings: lets a new review update the average with one atomic $inc.
+    ratingSum: { type: Number, min: 0 },
     releaseYear: { type: Number },
     active: { type: Boolean, default: true },
   },

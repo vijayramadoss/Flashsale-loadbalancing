@@ -2,6 +2,8 @@ import { config } from '../config/env.js';
 import { authenticate, botGuard, rateLimit } from '../plugins/guards.js';
 import * as authService from '../services/authService.js';
 import * as accountService from '../services/accountService.js';
+import { Product } from '../models/Product.js';
+import { notFound } from '../lib/errors.js';
 import { addressBody, email, objectId } from '../schemas/common.js';
 
 export default async function authRoutes(app) {
@@ -54,6 +56,23 @@ export default async function authRoutes(app) {
     preHandler: authenticate,
     schema: { params: { type: 'object', properties: { id: objectId } }, body: addressBody },
     handler: async (req) => ({ address: await accountService.updateAddress(req.user.id, req.params.id, req.body) }),
+  });
+
+  // ----- wishlist -----
+  const slugParams = { type: 'object', properties: { slug: { type: 'string', pattern: '^[a-z0-9-]{1,80}$' } } };
+  const productIdFor = async (slug) => {
+    const p = await Product.findOne({ slug, active: true }, { _id: 1 }).lean();
+    if (!p) throw notFound('Product not found');
+    return p._id;
+  };
+  app.get('/account/wishlist', { preHandler: authenticate }, async (req) => ({ items: await accountService.listWishlist(req.user.id) }));
+  app.put('/account/wishlist/:slug', { preHandler: authenticate, schema: { params: slugParams } }, async (req, reply) => {
+    await accountService.addToWishlist(req.user.id, await productIdFor(req.params.slug));
+    reply.code(204).send();
+  });
+  app.delete('/account/wishlist/:slug', { preHandler: authenticate, schema: { params: slugParams } }, async (req, reply) => {
+    await accountService.removeFromWishlist(req.user.id, await productIdFor(req.params.slug));
+    reply.code(204).send();
   });
 
   app.delete('/account/addresses/:id', {

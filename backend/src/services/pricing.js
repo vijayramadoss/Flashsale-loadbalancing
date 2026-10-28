@@ -17,17 +17,26 @@ export function deliveryQuote(method = 'STANDARD', from = new Date()) {
   };
 }
 
-/** items: [{ qty, unitPriceCents, mrpCents }] */
-export function priceOrder(items, deliveryMethod = 'STANDARD') {
+/** items: [{ qty, unitPriceCents, mrpCents }]; couponDiscountCents comes from couponService. */
+export function priceOrder(items, deliveryMethod = 'STANDARD', couponDiscountCents = 0) {
   const subtotalCents = items.reduce((sum, i) => sum + i.unitPriceCents * i.qty, 0);
   const mrpTotal = items.reduce((sum, i) => sum + i.mrpCents * i.qty, 0);
   const delivery = deliveryQuote(deliveryMethod);
+  const coupon = Math.min(couponDiscountCents, subtotalCents);
   return {
     subtotalCents,
     savingsCents: Math.max(0, mrpTotal - subtotalCents),
+    couponDiscountCents: coupon,
     deliveryCents: delivery.feeCents,
-    totalCents: subtotalCents + delivery.feeCents,
+    totalCents: subtotalCents - coupon + delivery.feeCents,
   };
+}
+
+/** GST is included in Indian retail prices; phones attract 18 %. Returns the split for invoices. */
+export function gstBreakup(totalCents, ratePct = 18) {
+  const taxable = Math.round((totalCents * 100) / (100 + ratePct));
+  const gst = totalCents - taxable;
+  return { ratePct, taxableCents: taxable, cgstCents: Math.floor(gst / 2), sgstCents: gst - Math.floor(gst / 2) };
 }
 
 export const discountPct = (priceCents, mrpCents) => (mrpCents > priceCents ? Math.round(((mrpCents - priceCents) / mrpCents) * 100) : 0);

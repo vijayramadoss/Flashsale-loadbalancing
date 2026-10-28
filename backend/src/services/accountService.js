@@ -59,6 +59,32 @@ export async function deleteAddress(userId, addressId) {
   await user.save();
 }
 
+// ---------- wishlist ----------
+const MAX_WISHLIST = 50;
+
+export async function listWishlist(userId) {
+  const user = await User.findById(userId, { wishlist: 1 }).populate({ path: 'wishlist', match: { active: true }, select: 'slug brand name design variants rating ratingCount' }).lean();
+  if (!user) throw new AppError(401, 'UNAUTHORIZED', 'Account no longer exists');
+  return (user.wishlist || []).filter(Boolean).map((p) => {
+    const cheapest = p.variants.reduce((a, b) => (b.priceCents < a.priceCents ? b : a));
+    return {
+      slug: p.slug, brand: p.brand, name: p.name, design: p.design, colorHex: cheapest.colorHex,
+      priceCents: cheapest.priceCents, mrpCents: cheapest.mrpCents, inStock: p.variants.some((v) => v.stock > 0),
+      rating: p.rating, ratingCount: p.ratingCount,
+    };
+  });
+}
+
+export async function addToWishlist(userId, productId) {
+  // $addToSet keeps it duplicate-free; the size guard keeps it bounded.
+  const res = await User.updateOne({ _id: userId, [`wishlist.${MAX_WISHLIST - 1}`]: { $exists: false } }, { $addToSet: { wishlist: productId } });
+  if (!res.matchedCount) throw new AppError(409, 'WISHLIST_FULL', `Your wishlist can hold up to ${MAX_WISHLIST} phones`);
+}
+
+export async function removeFromWishlist(userId, productId) {
+  await User.updateOne({ _id: userId }, { $pull: { wishlist: productId } });
+}
+
 /** Returns a plain snapshot of one of the user's addresses (for an order). */
 export async function addressSnapshot(userId, addressId) {
   const user = await loadUser(userId);

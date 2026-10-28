@@ -9,3 +9,4 @@ coverage/
 !.env.test
 !.env.loadtest
 !.env.sim
+!.env.docker.example

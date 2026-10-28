@@ -12,11 +12,13 @@ import { notFound } from './lib/errors.js';
 import { errorHandler } from './plugins/errors.js';
 import { rateLimit } from './plugins/guards.js';
 import { trafficPlugin } from './plugins/traffic.js';
+import { metricsPlugin } from './plugins/metrics.js';
 import authRoutes from './routes/auth.js';
 import catalogRoutes from './routes/catalog.js';
 import dealRoutes from './routes/deals.js';
 import orderRoutes from './routes/orders.js';
 import adminRoutes from './routes/admin.js';
+import webhookRoutes from './routes/webhooks.js';
 
 const frontendDist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../frontend/dist');
 
@@ -37,6 +39,7 @@ export async function buildApp() {
   await app.register(compress, { threshold: 1024, global: true });
   app.setErrorHandler(errorHandler);
   await app.register(trafficPlugin);
+  await app.register(metricsPlugin);
 
   await app.register(
     async (api) => {
@@ -48,6 +51,9 @@ export async function buildApp() {
         reply.code(mongoOk && redisOk ? 200 : 503);
         return { mongo: mongoOk, redis: redisOk };
       });
+
+      // Signed gateway webhooks: authenticated by signature, not rate-limited per IP.
+      await api.register(webhookRoutes);
 
       await api.register(async (limited) => {
         // Every other API route shares a per-IP budget, enforced across all replicas.

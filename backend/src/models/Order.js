@@ -1,8 +1,10 @@
 import mongoose from 'mongoose';
 
-export const ORDER_STATUS = ['PENDING_PAYMENT', 'CONFIRMED', 'SHIPPED', 'DELIVERED', 'CANCELLED', 'EXPIRED'];
+export const ORDER_STATUS = ['PENDING_PAYMENT', 'CONFIRMED', 'SHIPPED', 'DELIVERED', 'RETURNED', 'CANCELLED', 'EXPIRED'];
 // Statuses that still "own" stock (count as sold / held).
 export const ACTIVE_STATUSES = ['PENDING_PAYMENT', 'CONFIRMED', 'SHIPPED', 'DELIVERED'];
+// Statuses in which a unit counts as taken from a deal's allocation (a returned unit was still sold by the deal).
+export const DEAL_SOLD_STATUSES = [...ACTIVE_STATUSES, 'RETURNED'];
 
 // Line items and the address are SNAPSHOTS: later edits to the product or the
 // user's address book must never change what an order says was bought / where it ships.
@@ -44,9 +46,11 @@ const orderSchema = new mongoose.Schema(
     pricing: {
       subtotalCents: { type: Number, required: true },
       savingsCents: { type: Number, default: 0 },
+      couponDiscountCents: { type: Number, default: 0 },
       deliveryCents: { type: Number, default: 0 },
       totalCents: { type: Number, required: true },
     },
+    coupon: { id: { type: mongoose.Schema.Types.ObjectId, ref: 'Coupon' }, code: String },
     shippingAddress: addressSnapshot,
     delivery: {
       method: { type: String, enum: ['STANDARD', 'EXPRESS'], default: 'STANDARD' },
@@ -55,7 +59,9 @@ const orderSchema = new mongoose.Schema(
     },
     payment: {
       method: { type: String, enum: ['UPI', 'CARD', 'COD'] },
-      status: { type: String, enum: ['PENDING', 'PAID', 'COD', 'REFUNDED'], default: 'PENDING' },
+      // PENDING → PROCESSING (at the gateway) → PAID; FAILED attempts can be retried; PAID → REFUND_PENDING → REFUNDED.
+      status: { type: String, enum: ['PENDING', 'PROCESSING', 'PAID', 'COD', 'REFUND_PENDING', 'REFUNDED'], default: 'PENDING' },
+      paymentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Payment' },
       transactionId: String,
       cardBrand: String,
       last4: String, // the only card data ever stored
@@ -66,6 +72,17 @@ const orderSchema = new mongoose.Schema(
       lastError: String,
     },
     status: { type: String, enum: ORDER_STATUS, default: 'PENDING_PAYMENT' },
+    deliveredAt: Date,
+    // Return request on a delivered order (window: RETURN_WINDOW_DAYS).
+    returnRequest: {
+      status: { type: String, enum: ['REQUESTED', 'APPROVED', 'REJECTED'] },
+      reason: String,
+      requestedAt: Date,
+      decidedAt: Date,
+      note: String,
+    },
+    // Assigned once, when the order is confirmed (sequential, gap-free).
+    invoice: { number: String, issuedAt: Date },
     // Unpaid orders hold stock only until this moment (the worker's sweeper releases it).
     expiresAt: { type: Date },
     history: [{ _id: false, status: String, at: { type: Date, default: Date.now }, note: String }],

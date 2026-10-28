@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: flashsale
+    folder: FlashSale
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

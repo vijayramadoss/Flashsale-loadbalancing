@@ -23,7 +23,7 @@ import { Divider } from '@astryxdesign/core/Divider';
 import { Skeleton } from '@astryxdesign/core/Skeleton';
 import { EmptyState } from '@astryxdesign/core/EmptyState';
 import { Link } from '@astryxdesign/core/Link';
-import { api, newIdempotencyKey } from '../api.js';
+import { api, ApiError, newIdempotencyKey } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { useCart } from '../cart.jsx';
 import { navigate, useLocation } from '../router.jsx';
@@ -36,6 +36,21 @@ import Countdown from '../components/Countdown.jsx';
 import AddressDialog from '../components/AddressDialog.jsx';
 
 const DAY = 86_400_000;
+
+/** Polls a payment until the gateway has decided (≈1 s normally; gives up after 45 s). */
+async function waitForPayment(paymentId) {
+  const started = Date.now();
+  for (let delay = 400; Date.now() - started < 45_000; delay = Math.min(delay * 1.5, 2000)) {
+    await new Promise((r) => setTimeout(r, delay));
+    try {
+      const { data } = await api(`/payments/${paymentId}`);
+      if (data.payment.status !== 'PROCESSING') return data.payment;
+    } catch (err) {
+      if (err.status === 404) throw err; // network blips: keep polling
+    }
+  }
+  throw new ApiError(0, 'TIMEOUT', 'Your bank is taking longer than usual. Check My orders in a minute — you will not be charged twice.');
+}
 const DELIVERY = {
   STANDARD: { label: 'Standard delivery', feeCents: 0, min: 3, max: 5 },
   EXPRESS: { label: 'Express delivery', feeCents: 14900, min: 1, max: 2 },
@@ -79,6 +94,7 @@ function Checkout({ initialOrderId }) {
   const [fieldErrors, setFieldErrors] = useState({});
   const [payError, setPayError] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [payStage, setPayStage] = useState('');
   const [addOpen, setAddOpen] = useState(false);
   // One idempotency key per payment attempt: a double click or a retried
   // request reuses it (the server answers with the first result, no double charge).
@@ -107,7 +123,8 @@ function Checkout({ initialOrderId }) {
   }, [addresses.data, order, addressId]);
 
   // Already paid, cancelled or expired → the order page explains the state.
-  const closed = Boolean(orderId && order && !order.canPay && !busy);
+  // (Not "!canPay": canPay is briefly false while a payment is processing.)
+  const closed = Boolean(orderId && order && order.status !== 'PENDING_PAYMENT' && !busy);
   useEffect(() => {
     if (closed) navigate(`/orders/${order.id}`, { replace: true });
   }, [closed, order]);
@@ -177,12 +194,23 @@ function Checkout({ initialOrderId }) {
       }
       const body = method === 'UPI' ? { method, upi: { vpa: upi.trim() } } : method === 'CARD' ? { method, card: { ...cardForm, number: cardForm.number.replace(/\s/g, '') } } : { method };
       const { data } = await api(`/orders/${current.id}/pay`, { method: 'POST', body, headers: { 'Idempotency-Key': payKey.current }, timeoutMs: 15000 });
+      if (data.payment?.status === 'PROCESSING') {
+        // 202: the gateway is asking the bank. Its decision reaches the server by
+        // webhook; we poll the payment until it is decided.
+        setPayStage('Waiting for your bank…');
+        const final = await waitForPayment(data.payment.id);
+        if (final.status === 'FAILED') throw new ApiError(402, final.failureCode || 'PAYMENT_FAILED', final.failureMessage || 'The payment was declined');
+      }
       invalidateApiCache('/orders');
-      navigate(`/orders/${data.order.id}?placed=1`, { replace: true });
+      navigate(`/orders/${current.id}?placed=1`, { replace: true });
     } catch (err) {
       // Declined / failed: a new attempt gets a new key (the old one is "used up").
       if (err.status !== 0) payKey.current = newIdempotencyKey();
+      // Refresh the order (it may have changed while the bank was deciding) before re-enabling the form.
+      const id = orderId || createdHere.id;
+      if (id) await api(`/orders/${id}`).then(({ data }) => setOrder(data.order)).catch(() => {});
       setPayError(err);
+      setPayStage('');
       setBusy(false);
     }
   };
@@ -330,7 +358,7 @@ function Checkout({ initialOrderId }) {
               <HStack gap={2} hAlign="between">
                 <Button label="Back" variant="ghost" isDisabled={busy} onClick={() => setStep(1)} />
                 <Button
-                  label={method === 'COD' ? 'Place order' : pricing ? `Pay ${formatPrice(pricing.totalCents)}` : 'Pay'}
+                  label={payStage || (method === 'COD' ? 'Place order' : pricing ? `Pay ${formatPrice(pricing.totalCents)}` : 'Pay')}
                   variant="primary"
                   size="lg"
                   isLoading={busy}

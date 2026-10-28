@@ -12,6 +12,12 @@ import { signToken } from '../src/services/authService.js';
 import { createDeal, clearDealListCache } from '../src/services/dealService.js';
 import { ensureGroup, processBatch } from '../src/services/orderWorker.js';
 import { buildApp } from '../src/app.js';
+import { setWebhookDeliverer } from '../src/services/gateway/simulatorGateway.js';
+import { Payment } from '../src/models/Payment.js';
+import { WebhookEvent } from '../src/models/WebhookEvent.js';
+import { Coupon, CouponRedemption } from '../src/models/Coupon.js';
+import { Review } from '../src/models/Review.js';
+import { Counter } from '../src/models/Counter.js';
 
 export const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) FlashSaleTest/1.0';
 
@@ -26,9 +32,11 @@ export async function setup() {
   await connectMongo();
   await waitForRedis(getRedis());
   // syncIndexes also drops indexes left over from older schema versions.
-  for (const m of [User, Product, Deal, Order]) await m.syncIndexes();
+  for (const m of [User, Product, Deal, Order, Payment, WebhookEvent, Coupon, CouponRedemption, Review, Counter]) await m.syncIndexes();
   const app = await buildApp();
   await app.ready();
+  // The simulated gateway's webhooks are delivered straight into this app instance.
+  setWebhookDeliverer(async (body, headers) => (await app.inject({ method: 'POST', url: '/api/webhooks/gateway', payload: body, headers })).statusCode);
   return app;
 }
 
@@ -41,7 +49,7 @@ export async function teardown(app) {
 }
 
 export async function resetData() {
-  await Promise.all([User.deleteMany({}), Product.deleteMany({}), Deal.deleteMany({}), Order.deleteMany({})]);
+  await Promise.all([User, Product, Deal, Order, Payment, WebhookEvent, Coupon, CouponRedemption, Review, Counter].map((m) => m.deleteMany({})));
   const redis = getRedis();
   let cursor = '0';
   do {
@@ -141,3 +149,35 @@ export async function drainQueue(consumer = 'test-consumer') {
 
 export const card = (number = '4242424242424242') => ({ method: 'CARD', card: { number, expiry: '12/30', cvc: '123', name: 'Test User' } });
 export const idem = () => ({ 'idempotency-key': `test-${new mongoose.Types.ObjectId()}` });
+
+export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Polls fn until it returns a truthy value (or throws after timeout). */
+export async function waitFor(fn, { timeout = 4000, interval = 20 } = {}) {
+  const started = Date.now();
+  for (;;) {
+    const v = await fn();
+    if (v) return v;
+    if (Date.now() - started > timeout) throw new Error('waitFor timed out');
+    await sleep(interval);
+  }
+}
+
+/**
+ * Pays like the real checkout: POST /pay (202 PROCESSING) → poll the payment
+ * until the gateway webhook has decided → return the final payment and order.
+ */
+export async function payAndSettle(api, orderId, body, auth, headers = idem()) {
+  const res = await api.post(`/api/orders/${orderId}/pay`, body, { auth, headers });
+  if (res.status !== 202) return { res, payment: res.body?.payment, order: res.body?.order };
+  const payment = await waitFor(async () => {
+    const p = (await api.get(`/api/payments/${res.body.payment.id}`, { auth })).body.payment;
+    return p.status !== 'PROCESSING' ? p : null;
+  });
+  // The order is updated by the same webhook just after the payment.
+  const order = await waitFor(async () => {
+    const o = (await api.get(`/api/orders/${orderId}`, { auth })).body.order;
+    return o.payment.status !== 'PROCESSING' ? o : null;
+  });
+  return { res, payment, order };
+}

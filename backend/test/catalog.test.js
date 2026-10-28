@@ -68,5 +68,5 @@ test('cart quote prices from the database and flags unavailable lines', async ()
   assert.equal(l2.issue, 'OUT_OF_STOCK');
   assert.equal(l3.issue, 'NOT_FOUND');
   assert.equal(res.body.canCheckout, false);
-  assert.deepEqual(res.body.pricing, { subtotalCents: 2_000_000, savingsCents: 400_000, deliveryCents: 14_900, totalCents: 2_014_900 });
+  assert.deepEqual(res.body.pricing, { subtotalCents: 2_000_000, savingsCents: 400_000, couponDiscountCents: 0, deliveryCents: 14_900, totalCents: 2_014_900 });
 });

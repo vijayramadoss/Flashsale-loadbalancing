@@ -18,6 +18,12 @@ const dealSchema = new mongoose.Schema(
     mrpCents: { type: Number, required: true, min: 0, validate: Number.isInteger },
     // How long a winner has to complete checkout before the unit goes back on sale.
     holdMinutes: { type: Number, default: 10, min: 1, max: 60 },
+    // Virtual waiting room: shoppers queue before launch, get a random place at
+    // T-0 and are let through at releasePerSec (see services/waitingRoomService.js).
+    waitingRoom: {
+      enabled: { type: Boolean, default: false },
+      releasePerSec: { type: Number, default: 100, min: 1, max: 100_000 },
+    },
   },
   { timestamps: true },
 );

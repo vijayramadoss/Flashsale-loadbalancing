@@ -1,0 +1,12 @@
+# Scrapes every API replica's /metrics (plugins/metrics.js) every 5 s.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: flashsale-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api-1:4000", "api-2:4000", "api-3:4000"]
+    # If METRICS_TOKEN is set in .env, add:
+    # authorization: { type: Bearer, credentials: "<same token>" }

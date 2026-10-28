@@ -5,7 +5,7 @@ import { Deal } from '../src/models/Deal.js';
 import { Order } from '../src/models/Order.js';
 import { getRedis, keys } from '../src/lib/redis.js';
 import { expireDueOrders } from '../src/services/orderService.js';
-import { setup, teardown, resetData, client, makeUser, makeDeal, drainQueue, card, idem } from './helpers.js';
+import { setup, teardown, resetData, client, makeUser, makeDeal, drainQueue, card, idem, payAndSettle } from './helpers.js';
 
 let app;
 let api;
@@ -48,8 +48,8 @@ test('full path: reserve (202) → worker → pending order → address → pay 
   const cod = await api.post(`/api/orders/${orderId}/pay`, { method: 'COD' }, { auth: u.auth, headers: idem() });
   assert.equal(cod.status, 400, 'flash deals are prepaid only');
 
-  const paid = await api.post(`/api/orders/${orderId}/pay`, card(), { auth: u.auth, headers: idem() });
-  assert.equal(paid.body.order.status, 'CONFIRMED');
+  const { order: paid } = await payAndSettle(api, orderId, card(), u.auth);
+  assert.equal(paid.status, 'CONFIRMED');
   assert.equal((await Deal.findById(deal._id)).remainingStock, 2);
 });
 

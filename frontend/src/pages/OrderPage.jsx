@@ -74,7 +74,15 @@ export default function OrderPage({ id }) {
         />
       )}
       {order.status === 'EXPIRED' && <Banner status="info" title="This order expired" description="Payment wasn’t completed in time, so the reserved stock was released." collapsible={false} />}
-      {order.status === 'CANCELLED' && <Banner status="info" title="This order was cancelled" description={order.payment.status === 'REFUNDED' ? 'Your payment has been refunded to the original method.' : undefined} collapsible={false} />}
+      {order.status === 'CANCELLED' && (
+        <Banner
+          status="info"
+          title="This order was cancelled"
+          description={order.payment.status === 'REFUNDED' ? 'Your payment has been refunded to the original method.' : order.payment.status === 'REFUND_PENDING' ? 'Your refund is on its way to the original payment method.' : undefined}
+          collapsible={false}
+        />
+      )}
+      {order.status === 'RETURNED' && <Banner status="info" title="This order was returned" description="The refund has been issued to your original payment method." collapsible={false} />}
 
       <HStack gap={3} hAlign="between" vAlign="center" wrap="wrap">
         <VStack gap={0.5}>
@@ -169,6 +177,8 @@ export default function OrderPage({ id }) {
 
 function paymentText(p) {
   if (p.status === 'COD') return 'Cash on delivery';
+  if (p.status === 'PROCESSING') return 'Payment processing — waiting for your bank';
+  if (p.status === 'REFUND_PENDING') return 'Refund in progress to the original payment method';
   if (p.status === 'REFUNDED') return `Refunded${p.method === 'CARD' ? ` to ${p.cardBrand} •••• ${p.last4}` : p.vpa ? ` to ${p.vpa}` : ''}`;
   if (p.status === 'PAID') return p.method === 'CARD' ? `Paid with ${p.cardBrand} •••• ${p.last4}` : `Paid via UPI (${p.vpa})`;
   return p.failedAttempts ? `Not paid — ${p.failedAttempts} declined attempt${p.failedAttempts > 1 ? 's' : ''}` : 'Not paid yet';

@@ -1,5 +1,6 @@
 // Background process: (1) turns queued flash-deal reservations into pending
-// orders, (2) sweeps unpaid orders whose hold expired and returns their stock.
+// orders, (2) sweeps unpaid orders whose hold expired and returns their stock,
+// (3) reconciles payments whose gateway webhook never arrived.
 // Run one or more alongside the API (`npm run worker`); several workers share
 // the queue through a consumer group, and the sweeper's conditional updates
 // make it safe for more than one worker to sweep at the same time.
@@ -10,6 +11,7 @@ import { closeRedis, createRedis, getRedis, waitForRedis } from './lib/redis.js'
 import { logger } from './lib/logger.js';
 import { ensureGroup, processBatch, reclaimStale } from './services/orderWorker.js';
 import { expireDueOrders } from './services/orderService.js';
+import { reconcilePayments } from './services/paymentEvents.js';
 
 const consumer = `${os.hostname()}-${process.pid}`;
 let running = true;
@@ -25,6 +27,7 @@ async function run() {
 
   let lastReclaim = 0;
   let lastSweep = 0;
+  let lastReconcile = 0;
   while (running) {
     try {
       const now = Date.now();
@@ -37,6 +40,11 @@ async function run() {
         lastSweep = now;
         const n = await expireDueOrders();
         if (n) logger.info('expired unpaid orders', { count: n });
+      }
+      if (now - lastReconcile > 30_000) {
+        lastReconcile = now;
+        const n = await reconcilePayments(config.payments.reconcileAfterMs);
+        if (n) logger.info('reconciled payments that missed their webhook', { count: n });
       }
       await processBatch(blocking, consumer);
     } catch (err) {

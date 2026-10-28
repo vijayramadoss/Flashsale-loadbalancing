@@ -18,6 +18,17 @@ export async function authenticate(request) {
   }
 }
 
+/** Like authenticate, but anonymous requests pass through (request.user stays undefined). */
+export async function optionalAuth(request) {
+  const [scheme, token] = (request.headers.authorization || '').split(' ');
+  if (scheme !== 'Bearer' || !token) return;
+  try {
+    request.user = verifyToken(token);
+  } catch {
+    /* treat an invalid token as anonymous on public endpoints */
+  }
+}
+
 export async function requireAdmin(request) {
   if (!request.user) throw unauthorized();
   if (request.user.role !== 'admin') throw forbidden();

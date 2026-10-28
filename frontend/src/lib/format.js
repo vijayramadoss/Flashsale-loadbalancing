@@ -35,6 +35,7 @@ export const ORDER_STATUS = {
   CONFIRMED: { label: 'Confirmed', badge: 'info' },
   SHIPPED: { label: 'Shipped', badge: 'info' },
   DELIVERED: { label: 'Delivered', badge: 'success' },
+  RETURNED: { label: 'Returned', badge: 'neutral' },
   CANCELLED: { label: 'Cancelled', badge: 'neutral' },
   EXPIRED: { label: 'Expired', badge: 'neutral' },
 };

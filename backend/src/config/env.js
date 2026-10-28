@@ -1,6 +1,7 @@
 // Central, validated configuration. Every other module imports from here
 // instead of reading process.env directly, so misconfiguration fails fast at boot.
 import os from 'node:os';
+import { createHash } from 'node:crypto';
 
 const num = (value, fallback) => {
   const n = Number(value);
@@ -56,6 +57,26 @@ export const config = {
     maxQtyPerLine: 5,
   },
 
+  payments: {
+    // Shared secret the gateway signs webhooks with (Razorpay/Stripe give you one per endpoint).
+    webhookSecret: process.env.PAYMENT_WEBHOOK_SECRET || '',
+    // Where the (simulated) gateway POSTs its webhooks — the load balancer in a multi-replica setup.
+    webhookUrl: process.env.PAYMENT_WEBHOOK_URL || `http://127.0.0.1:${num(process.env.PORT, 4000)}/api/webhooks/gateway`,
+    simDelayMs: num(process.env.PAYMENT_SIM_DELAY_MS, 600), // simulated bank decision time
+    reconcileAfterMs: num(process.env.PAYMENT_RECONCILE_AFTER_MS, 60_000),
+  },
+
+  waitingRoom: {
+    admissionTtlSec: num(process.env.WAITING_ROOM_ADMISSION_TTL_SEC, 120),
+  },
+  pow: {
+    // Leading zero bits a proof-of-work solution needs (16 ≈ 65k SHA-256 hashes, ~0.2-1 s in a browser).
+    difficulty: num(process.env.POW_DIFFICULTY, 16),
+    ttlSec: num(process.env.POW_TTL_SEC, 300),
+  },
+  returnWindowDays: num(process.env.RETURN_WINDOW_DAYS, 7),
+  metricsToken: process.env.METRICS_TOKEN || '',
+
   // Seconds a catalog listing is cached in Redis (shared by every replica).
   catalogCacheSec: num(process.env.CATALOG_CACHE_SEC, 30),
 
@@ -68,4 +89,8 @@ export const config = {
 
 if (!config.jwtSecret || config.jwtSecret.length < 32) {
   throw new Error('JWT_SECRET must be set and at least 32 characters long (see backend/.env.example)');
+}
+// Development fallback: derive a webhook secret from the JWT secret (set PAYMENT_WEBHOOK_SECRET in production).
+if (!config.payments.webhookSecret) {
+  config.payments.webhookSecret = createHash('sha256').update(`webhook:${config.jwtSecret}`).digest('hex');
 }

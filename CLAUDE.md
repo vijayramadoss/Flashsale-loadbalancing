@@ -330,6 +330,8 @@ Same tests on Express (session 1): 1,796–2,319 req/s, p99 232–458 ms → Fas
 | E16 | Checkout would remount mid-payment | URL change to `/checkout/:id` changed the React key → keep key for orders created on the page |
 | E17 | NGINX `bind() to 0.0.0.0:8080 failed (10013)` | port 8080 already used by another program → demo listens on 127.0.0.1:8088 |
 | E18 | NGINX "1024 worker_connections are not enough"; simulator process died (0xC0000409) | Windows NGINX = 1 worker with select() (≤ 1,024 sockets, client + upstream) → simulator pool lowered from 800 to 400 sockets; run with `--report-on-fatalerror` |
+| E20 | Declined payment in the web checkout jumped to the order page | checkout used a copy of the order fetched while the payment was PROCESSING (`canPay` false) → "closed" now means status ≠ PENDING_PAYMENT, and the order is re-fetched after a failed payment |
+| E21 | 62 of 10,000 simulated shoppers timed out waiting for payment | local NGINX rate-limited the gateway's webhooks (812 × 429, all from one address); retries + reconciliation healed it, but the webhook path is now exempt (signature-checked in the API). Rerun: 0 webhook 429s, 0 errors |
 | E19 | Client-side per-replica split looked lopsided | cached/stale responses keep the original replica's `X-Served-By` → trust the server-side Traffic counters; the simulator labels `X-Cache: HIT` as nginx-cache |
 
 ## 13. Commands
@@ -360,6 +362,7 @@ Questions: (1) Why can't the deal oversell even if Redis is wrong? (2) What stop
 
 ## 17. Change Log
 **Session 1 (2026-10-28)** — MERN flash-sale checkout (Express), Redis Lua + Streams, tests, load tests (see git `5dd1b7b`).
+**Session 4 (2026-10-29)** — Gateway-style payments (intents, HMAC-signed webhooks, retries, reconciliation, async refunds), coupons, verified reviews, wishlist, returns, GST invoices, waiting room + proof-of-work, admin catalog editor, Prometheus `/metrics`; Docker (2 Dockerfiles, compose with Valkey/Mongo/3 APIs/2 workers/NGINX/Prometheus/Grafana); `smoke-test.js`. Tests 65/65, smoke 33/33, 10k simulation all checks. Fixes E20–E21. See §21. **No UI was added for coupons/reviews/wishlist/returns/invoices/waiting room — API only, by request.**
 **Session 3 (2026-10-28)** — Real NGINX (1.28 Windows build in `E:\tools`) in front of 3 API replicas + 2 workers; replica identity (`REPLICA_ID`, `X-Served-By`), per-replica traffic counters and admin **Traffic** tab; `simulate-users.js` (10,000 accounts walking the real journey). Fixes E17–E19. Result in §19.
 **Session 2 (2026-10-28)** — Full storefront redesign: Fastify migration; Product/Deal/Order/User models redesigned; catalog (10 phones), cart quote, cart orders with transactional stock holds, simulated payments with idempotency, cancellation/refund, hold-expiry sweeper, address book, admin fulfilment; React 19 + Astryx neutral UI (12 screens), route splitting, precompressed assets; 44 tests; load tests ≈2× Express; browser E2E. Fixes E9–E16. Decisions A5, A10–A13.
 
@@ -487,3 +490,59 @@ There is **no real CDN deployed**. What is implemented is everything a CDN needs
 | Browser view | DevTools → Network → reload twice | assets show "(memory/disk cache)", 0 bytes transferred ✔ |
 
 **With a real CDN** (Cloudflare / CloudFront / Akamai) in front of NGINX, verify the same way against the CDN hostname and look for its headers: `cf-cache-status: HIT` (Cloudflare) or `x-cache: Hit from cloudfront` and a growing `age:` header, plus edge-location headers (`cf-ray`, `x-amz-cf-pop`) from different regions. The deal-status endpoint already sends `Cache-Control: public, max-age=1`, so a CDN would honour the 1-second caching without code changes.
+
+## 21. Session 4: Payments Gateway Flow, Store Features, Waiting Room, Docker
+
+### Payments (gateway pattern, simulated provider)
+`POST /api/orders/:id/pay` (UPI/card) → creates a `Payment` (PROCESSING) and calls the gateway → **202** + `Location: /api/payments/:id`. The bank's decision arrives later as a **signed webhook** `POST /api/webhooks/gateway` (`Gateway-Signature: t=…,v1=HMAC-SHA256(secret, t.body)`, 5-min replay window, constant-time compare). Webhooks are retried with backoff (at-least-once); `WebhookEvent` (unique event id) + conditional status updates make them idempotent. Every 30 s the worker **reconciles** payments still PROCESSING / REFUND_PENDING after 60 s by asking the gateway. Money arriving after an order closed is **refunded automatically**. Cancel / approved return → `gateway.refund` → `refund.processed` webhook → REFUNDED. COD stays synchronous. Swap-in point for Razorpay/Stripe: `services/gateway/simulatorGateway.js` (createPayment / refund / getPayment).
+
+### New endpoints
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/payments/:id` | poll a payment (owner) |
+| `POST /api/webhooks/gateway` | signed gateway events (not rate-limited) |
+| `POST /api/cart/quote {couponCode}`, `POST /api/orders {couponCode}` | coupon preview / redemption (atomic `usedCount < usageLimit`, one per customer, given back on cancel/expiry) |
+| `GET/POST /api/products/:slug/reviews` | verified-purchase reviews (DELIVERED order required), average updated with one pipeline update |
+| `GET /api/account/wishlist`, `PUT/DELETE /api/account/wishlist/:slug` | wishlist (≤ 50, `$addToSet`) |
+| `POST /api/orders/:id/return`, `POST /api/admin/orders/:id/return-decision`, `GET /api/admin/orders?returns=true` | returns within `RETURN_WINDOW_DAYS` (7); approve → restock + refund → RETURNED |
+| `GET /api/orders/:id/invoice` | GST tax invoice (sequential `INV-YYYY-000001` via atomic counter; 18 % GST split) |
+| `GET /api/pow/challenge`, `POST /api/deals/:id/queue {challenge,nonce}`, `GET /api/deals/:id/queue` | proof-of-work + waiting room; reserve needs `X-Admission-Token` when the deal has a room |
+| `GET/POST /api/admin/coupons`, `POST /api/admin/coupons/:id/active` | coupon admin |
+| `GET /api/admin/products`, `PATCH …/:id`, `PATCH …/:id/variants/:sku`, `POST …/variants/:sku/stock {delta}`, `POST …/:id/variants` | catalog editor (stock as atomic, non-negative deltas) |
+| `GET /metrics` (each replica, internal / `METRICS_TOKEN`) | Prometheus counters, latency histograms, queue gauges, event-loop delay, memory |
+
+**Waiting room math:** join before T-0 → random score (fair lottery); after T-0 → behind everyone. Position *r* is admitted at `startsAt + r / releasePerSec` — computed, no background job, every replica agrees. Admission = 2-minute JWT bound to user + deal. **Proof-of-work:** signed, expiring, single-use challenge; client finds a nonce with N leading zero bits of SHA-256 (N=16 ≈ 65k hashes; 157–380 ms measured in Node); verification is one hash.
+
+### Docker (files written + validated; not run — the Docker daemon needs space on C:)
+```bash
+cp .env.docker.example .env
+```
+```bash
+docker compose up -d --build
+```
+```bash
+docker compose run --rm seed
+```
+Store http://localhost:8080 · Grafana http://localhost:3000 (dashboard "FlashSale — traffic, latency, queue").
+| File | What it is |
+|---|---|
+| `backend/Dockerfile` | node:24-alpine, production deps only, non-root, healthcheck on `/api/health/ready`; same image for API and worker |
+| `frontend/Dockerfile` | builds the SPA (incl. bundle-budget gate) → nginx:1.28-alpine with `infra/docker/nginx.conf` |
+| `docker-compose.yml` | mongo:8.0 + `mongo-init` (replica set), valkey:8.1 (password, AOF), api-1..3, worker-1..2, web (NGINX :8080), prometheus, grafana; private network 172.28.0.0/16 (only web + grafana published); `seed` under profile `tools` |
+| `infra/prometheus/prometheus.yml`, `infra/grafana/…` | scrape config, datasource + 6-panel dashboard |
+| `.env.docker.example` | secrets template (never commit `.env`) |
+Validation done: `docker compose config` ✔ (11 services + seed), container NGINX config passes `nginx -t` (with hostnames/paths mapped locally) ✔, dashboard JSON ✔. **Not done:** `docker build` / `up` (needs the daemon). To run it: free space on C:, or in Docker Desktop → Settings → Resources → Disk image location, choose E:. MongoDB in compose has no auth (private network only); Valkey requires a password.
+
+### Verification (2026-10-29)
+| Check | Result |
+|---|---|
+| Backend tests (real Mongo + Redis) | **56/56** (new: payments 5, store 11, waiting room 4; rewritten orders 10) |
+| Frontend tests / build | **9/9**; 170.0 KB Brotli initial |
+| `scripts/smoke-test.js` through NGINX → 3 replicas | **33/33** (accounts, catalog, wishlist, coupon, decline→UPI via webhook, invoice, ship/deliver, review, return+refund, COD+cancel, stock deltas, waiting room + PoW + token, deal consistency, forged webhook 401, bot 403, /metrics, multi-replica) |
+| Browser (built-in, via :8088) | checkout: UPI `fail@bank` → "Payment declined, items still reserved" (after fix E20) → `browser@okbank` → confirmation; cancel → "refund on its way" → "Refunded to br***@okbank" |
+| 10,000-user simulation (async payments, webhooks via NGINX) | 83,195 requests, 0 errors; 500 reserved → 438 paid (36 after a decline) + 62 abandoned; Mongo 0 = Redis 0; not oversold; 0 webhook 429s (after fix E21) |
+
+Run the smoke test yourself (LB demo running):
+```bash
+cd backend && node --env-file=.env --env-file=.env.sim scripts/smoke-test.js
+```

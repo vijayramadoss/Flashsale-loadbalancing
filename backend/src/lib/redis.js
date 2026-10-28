@@ -15,6 +15,9 @@ export const keys = {
   catalog: (hash) => `${p()}cache:catalog:${hash}`,
   trafficSecond: (sec) => `${p()}stats:sec:${sec}`,
   trafficReplicas: () => `${p()}stats:replicas`,
+  gatewayPayment: (id) => `${p()}gw:pay:${id}`,
+  waitingRoom: (dealId) => `${p()}wr:${dealId}`,
+  powUsed: (hash) => `${p()}pow:used:${hash}`,
 };
 
 export const ORDER_GROUP = 'order-writers';

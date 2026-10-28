@@ -6,6 +6,7 @@ import { Product, variantLabel } from '../models/Product.js';
 import { config } from '../config/env.js';
 import { badRequest } from '../lib/errors.js';
 import { DELIVERY_OPTIONS, priceOrder } from './pricing.js';
+import { previewCoupon } from './couponService.js';
 
 /** Resolves [{sku, qty}] against the catalog. Returns lines + issues, never throws for stock problems. */
 export async function resolveLines(items) {
@@ -45,12 +46,15 @@ export async function resolveLines(items) {
   });
 }
 
-export async function quote(items, deliveryMethod = 'STANDARD') {
+export async function quote(items, deliveryMethod = 'STANDARD', couponCode, userId) {
   const lines = await resolveLines(items);
   const buyable = lines.filter((l) => !l.issue || l.issue === 'QTY_REDUCED');
+  const subtotal = buyable.reduce((n, l) => n + l.unitPriceCents * l.qty, 0);
+  const coupon = couponCode ? await previewCoupon(couponCode, subtotal, userId) : null;
   return {
     lines: lines.map(({ product, ...l }) => l),
-    pricing: priceOrder(buyable, deliveryMethod),
+    coupon,
+    pricing: priceOrder(buyable, deliveryMethod, coupon?.discountCents || 0),
     deliveryOptions: Object.values(DELIVERY_OPTIONS),
     canCheckout: buyable.length > 0 && lines.every((l) => !l.issue),
   };

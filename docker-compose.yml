@@ -1,0 +1,156 @@
+# Full FlashSale stack in containers.
+#
+#   browser ──▶ web (NGINX :8080) ──▶ api-1 / api-2 / api-3 ──▶ valkey (Redis-compatible)  +  mongo (replica set)
+#                                                   ▲                ▲
+#                               worker-1 / worker-2 ┘  prometheus ──┘ (scrapes /metrics) ──▶ grafana :3000
+#
+# Usage:
+#   cp .env.docker.example .env        # then fill in the secrets
+#   docker compose up -d --build
+#   docker compose run --rm seed       # admin + phone catalog + a flash deal
+#   open http://localhost:8080          (Grafana: http://localhost:3000)
+#
+# Only `web` and `grafana` publish ports; databases and APIs stay on the private network.
+
+x-api-env: &api-env
+  NODE_ENV: production
+  PORT: "4000"
+  MONGO_URI: mongodb://mongo:27017/flashsale?replicaSet=rs0
+  REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@valkey:6379/0
+  REDIS_PREFIX: "fs:"
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (32+ chars)}
+  PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:?set PAYMENT_WEBHOOK_SECRET in .env}
+  # The (simulated) gateway calls us back through the load balancer, like a real one would.
+  PAYMENT_WEBHOOK_URL: http://web/api/webhooks/gateway
+  # Only the NGINX container's network may set X-Forwarded-For.
+  TRUST_PROXY: 172.28.0.0/16
+  ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@flashsale.test}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
+  METRICS_TOKEN: ${METRICS_TOKEN:-}
+
+x-api: &api
+  build: { context: ., dockerfile: backend/Dockerfile }
+  image: flashsale-api:latest
+  restart: unless-stopped
+  networks: [backend]
+  depends_on:
+    mongo-init: { condition: service_completed_successfully }
+    valkey: { condition: service_healthy }
+
+services:
+  mongo:
+    image: mongo:8.0
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    restart: unless-stopped
+    networks: [backend]
+    volumes: [mongo-data:/data/db]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # One-shot: turn the single mongod into replica set rs0 (needed for transactions). Idempotent.
+  mongo-init:
+    image: mongo:8.0
+    networks: [backend]
+    depends_on: { mongo: { condition: service_healthy } }
+    restart: "no"
+    command:
+      - mongosh
+      - --host
+      - mongo:27017
+      - --quiet
+      - --eval
+      - "try { rs.status().ok } catch (e) { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'mongo:27017' }] }) }"
+
+  valkey:
+    image: valkey/valkey:8.1-alpine
+    command: ["valkey-server", "--appendonly", "yes", "--appendfsync", "everysec", "--requirepass", "${REDIS_PASSWORD}"]
+    restart: unless-stopped
+    networks: [backend]
+    volumes: [valkey-data:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli -a \"$${REDIS_PASSWORD}\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+  api-1:
+    <<: *api
+    environment: { <<: *api-env, REPLICA_ID: api-1 }
+  api-2:
+    <<: *api
+    environment: { <<: *api-env, REPLICA_ID: api-2 }
+  api-3:
+    <<: *api
+    environment: { <<: *api-env, REPLICA_ID: api-3 }
+
+  worker-1:
+    <<: *api
+    command: ["node", "src/worker.js"]
+    healthcheck: { disable: true }
+    environment: { <<: *api-env, REPLICA_ID: worker-1 }
+  worker-2:
+    <<: *api
+    command: ["node", "src/worker.js"]
+    healthcheck: { disable: true }
+    environment: { <<: *api-env, REPLICA_ID: worker-2 }
+
+  # One-shot data loader:  docker compose run --rm seed
+  seed:
+    <<: *api
+    profiles: [tools]
+    restart: "no"
+    command: ["node", "scripts/seed.js", "--starts-in-min=5"]
+    healthcheck: { disable: true }
+    environment: { <<: *api-env, REPLICA_ID: seed }
+
+  web:
+    build: { context: ., dockerfile: frontend/Dockerfile }
+    image: flashsale-web:latest
+    restart: unless-stopped
+    ports: ["8080:80"]
+    networks:
+      backend: { ipv4_address: 172.28.0.10 }
+    depends_on:
+      api-1: { condition: service_healthy }
+      api-2: { condition: service_healthy }
+      api-3: { condition: service_healthy }
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    networks: [backend]
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on: [api-1, api-2, api-3]
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    restart: unless-stopped
+    ports: ["3000:3000"]
+    networks: [backend]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on: [prometheus]
+
+networks:
+  backend:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  mongo-data:
+  valkey-data:
+  prometheus-data:
+  grafana-data:

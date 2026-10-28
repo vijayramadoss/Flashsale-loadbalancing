@@ -1,5 +1,7 @@
 import * as catalogService from '../services/catalogService.js';
 import * as cartService from '../services/cartService.js';
+import * as reviewService from '../services/reviewService.js';
+import { authenticate, optionalAuth } from '../plugins/guards.js';
 import { cartItems, deliveryMethod } from '../schemas/common.js';
 
 export default async function catalogRoutes(app) {
@@ -42,12 +44,41 @@ export default async function catalogRoutes(app) {
         type: 'object',
         additionalProperties: false,
         required: ['items'],
-        properties: { items: { ...cartItems, minItems: 0 }, deliveryMethod },
+        properties: { items: { ...cartItems, minItems: 0 }, deliveryMethod, couponCode: { type: 'string', pattern: '^[A-Za-z0-9]{3,20}$' } },
+      },
+    },
+    preHandler: optionalAuth, // signed-in shoppers also get "you already used this coupon" checks
+    handler: async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      return cartService.quote(req.body.items, req.body.deliveryMethod, req.body.couponCode, req.user?.id);
+    },
+  });
+
+  // ----- reviews -----
+  const slugParams = { type: 'object', properties: { slug: { type: 'string', pattern: '^[a-z0-9-]{1,80}$' } } };
+  app.get('/products/:slug/reviews', {
+    preHandler: optionalAuth,
+    schema: { params: slugParams, querystring: { type: 'object', properties: { page: { type: 'integer', minimum: 1, default: 1 } } } },
+    handler: async (req) => reviewService.listReviews(req.params.slug, { page: req.query.page, userId: req.user?.id }),
+  });
+  app.post('/products/:slug/reviews', {
+    preHandler: authenticate,
+    schema: {
+      params: slugParams,
+      body: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['rating', 'title'],
+        properties: {
+          rating: { type: 'integer', minimum: 1, maximum: 5 },
+          title: { type: 'string', minLength: 3, maxLength: 100 },
+          body: { type: 'string', maxLength: 2000 },
+        },
       },
     },
     handler: async (req, reply) => {
-      reply.header('Cache-Control', 'no-store');
-      return cartService.quote(req.body.items, req.body.deliveryMethod);
+      reply.code(201);
+      return { review: await reviewService.addReview(req.params.slug, req.user.id, req.body) };
     },
   });
 }
