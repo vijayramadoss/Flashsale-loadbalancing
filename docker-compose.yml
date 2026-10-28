@@ -105,7 +105,7 @@ services:
     <<: *api
     profiles: [tools]
     restart: "no"
-    command: ["node", "scripts/seed.js", "--starts-in-min=5"]
+    command: ["node", "scripts/seed.js", "--starts-in-min=2"]
     healthcheck: { disable: true }
     environment: { <<: *api-env, REPLICA_ID: seed }
 
