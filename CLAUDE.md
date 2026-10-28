@@ -181,7 +181,7 @@ E:\goMl
 │  │  └─ services/            authService, accountService, catalogService, cartService, dealService,
 │  │                          reservationService, orderService, paymentService (simulated), pricing,
 │  │                          orderProcessor (worker txn), orderWorker (stream mechanics)
-│  ├─ scripts/               init-replset, seed (+catalog-data), loadtest (raw burst), simulate-users (10k-shopper journey via NGINX)
+│  ├─ scripts/               init-replset, seed (+catalog-data), loadtest (raw burst), simulate-users (10k-shopper journey via NGINX), watch-queue (live queue depth / workers)
 │  └─ test/                  helpers + auth, catalog, orders, deals, concurrency, integrity
 └─ frontend/
    ├─ index.html             preloads the first two API calls
@@ -431,3 +431,59 @@ Watch live: http://127.0.0.1:8088/admin → **Traffic** (requests/s per replica)
 | Database truth | Mongo remaining 0 · Redis tokens 0 · 453 CONFIRMED + 47 PENDING_PAYMENT = 500 · oversold **no** |
 
 **Reading the latency honestly:** the replicas answered in about 35 ms on average. The multi-second reserve times are 15,212 near-simultaneous clicks queueing in the generator's 400-socket pool and in Windows NGINX's single select()-based worker — all on the same laptop as the servers and databases. On Linux NGINX (epoll, several workers) with load generators on separate machines, the same backend would show far lower client latency, and a virtual waiting room (§18) would flatten the click spike itself.
+
+## 20. How to Verify the Queue, the Load Balancer and the CDN Setup
+Everything below was run against the demo (`infra/start-lb-demo.ps1`); outputs are real (2026-10-28).
+
+### A. The queue (Redis Streams + 2 workers)
+**Watch it live** while a sale/simulation runs (second terminal, in `backend/`):
+```bash
+node --env-file=.env --env-file=.env.sim scripts/watch-queue.js --seconds=120
+```
+Columns: `tokens` (units left at the Redis gate) · `queued` (admitted, waiting) · `inFlight` (taken by a worker, not yet acknowledged) · `orders pending/paid` (already in MongoDB) · each worker's in-flight count.
+
+Observed with 6,000 users / 500 units:
+| Time | tokens | queued | inFlight | orders | What it shows |
+|---|---|---|---|---|---|
+| 11:18:17 | 486 | 8 | 2 | 0 | sale opens, first admissions |
+| 11:18:18 | **0** | 394 | 79 | 15 | **all 500 admitted within ~1 s** — every shopper already has a 202 |
+| 11:18:19–25 | 0 | 344 → 44 | ~30–75 | 64 → 379 | two workers alternately take batches of ~50 and write orders |
+| 11:18:26 | 0 | **0** | 54 → 0 | 347 pending / 99 paid | queue drained ~9 s after opening; customers now paying |
+
+So: the HTTP side finished in about a second, the database side ran at a steady ~55 transactions/s, and nothing was lost or doubled (500 orders = 500 tokens). Raising write throughput = add workers (same consumer group) — no API change.
+
+**Manual checks with redis-cli** (prefix `fssim:` for the demo, `fs:` for dev):
+```bash
+E:/tools/redis/redis-cli.exe XINFO GROUPS fssim:orders:stream
+```
+```bash
+E:/tools/redis/redis-cli.exe XINFO CONSUMERS fssim:orders:stream order-writers
+```
+```bash
+E:/tools/redis/redis-cli.exe XPENDING fssim:orders:stream order-writers
+```
+`XLEN` grows during the burst and returns to 0 (processed messages are deleted); `XPENDING` > 0 for long = a stuck/crashed worker (its jobs are reclaimed after 30 s). Admin → Flash deals shows the same as "Queue: unacked" next to the Redis vs Mongo counters. Crash-reclaim and idempotency are covered by `test/integrity.test.js`.
+
+### B. The load balancer (NGINX → api-1..3)
+1. **Distribution:** every response has `X-Served-By`. 30 requests → `api-1=10 api-2=10 api-3=10`:
+   ```bash
+   for i in $(seq 30); do curl -s -o /dev/null -D - http://127.0.0.1:8088/api/products?limit=1 | grep -i x-served-by; done | sort | uniq -c
+   ```
+2. **Under load:** Admin → **Traffic** (live req/s per replica). 10,000-user run: 8,250 / 8,402 / 8,213 requests.
+3. **NGINX's own view:** `E:\tools\nginx-1.28.0\logs\lb-access.log` has one line per request with the upstream that served it (`-> 127.0.0.1:4002 200 0.004s`).
+4. **Failover (verified):** stop api-2 while sending requests → `api-1=15 api-3=15, errors=0`; NGINX logs `upstream server temporarily disabled`; restart api-2 → after `fail_timeout` (5 s) it rejoins: `api-1=11 api-2=10 api-3=9`. Caveat: on Windows a dead port *times out* (2 s `proxy_connect_timeout`) instead of refusing, so the first request after the failure is slow but succeeds. Production: lower the connect timeout and add active health checks (NGINX Plus / ALB target-group health checks / Kubernetes readiness on `/api/health/ready`).
+5. **No shared memory between replicas (why it is safe):** the simulation's invariant checks (500 reserved, Mongo = Redis, no oversell) passed with all three replicas admitting buyers concurrently.
+
+### C. "CDN" — what is implemented and how to verify it
+There is **no real CDN deployed**. What is implemented is everything a CDN needs, with NGINX playing the edge locally:
+| Check | Command | Expected (observed) |
+|---|---|---|
+| Fingerprinted assets cached for a year | `curl -sI http://127.0.0.1:8088/assets/index-<hash>.js` | `Cache-Control: public, max-age=31536000, immutable` ✔ |
+| HTML always revalidated (new deploy shows instantly) | `curl -sI http://127.0.0.1:8088/` | `Cache-Control: no-cache`, `ETag` ✔ |
+| Revalidation is cheap | `curl -s -o NUL -w "%{http_code}" -H "If-None-Match: <etag>" http://127.0.0.1:8088/` | `304` ✔ |
+| Pre-compressed transfer | `curl -sI -H "Accept-Encoding: gzip" …/assets/index-<hash>.js` | `Content-Encoding: gzip`, 170 KB vs 562 KB raw ✔ (Fastify on :4000 serves Brotli 140 KB) |
+| Edge micro-cache of the hot API read | `curl -sI http://127.0.0.1:8088/api/deals/<id>` twice | `X-Cache: MISS`, then `HIT` ✔ — 74,200 of 75,699 polls in the 10k run were HITs |
+| Edge bot blocking | `curl -s -o NUL -w "%{http_code}" -X POST http://127.0.0.1:8088/api/deals/<id>/reserve` | `403` from NGINX (HTML page, never reaches Node) ✔ |
+| Browser view | DevTools → Network → reload twice | assets show "(memory/disk cache)", 0 bytes transferred ✔ |
+
+**With a real CDN** (Cloudflare / CloudFront / Akamai) in front of NGINX, verify the same way against the CDN hostname and look for its headers: `cf-cache-status: HIT` (Cloudflare) or `x-cache: Hit from cloudfront` and a growing `age:` header, plus edge-location headers (`cf-ray`, `x-amz-cf-pop`) from different regions. The deal-status endpoint already sends `Cache-Control: public, max-age=1`, so a CDN would honour the 1-second caching without code changes.
