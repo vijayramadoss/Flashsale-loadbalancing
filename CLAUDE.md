@@ -83,7 +83,7 @@ Legend: **Verified** = implemented + evidence in §11.
 | R13 | Optimistic UI | instant "Reserving…/Securing your unit…" | lib.test | **Verified** |
 | R14 | Asset pre-fetching / CDN | `<link rel=preload>` for first API calls, idle route-chunk prefetch, hashed immutable assets, precompressed `.br/.gz`; **CDN edge** `infra/cdn.local.conf` / `infra/docker/cdn.conf`, `build:cdn` (`CDN_URL`) | `scripts/cdn-check.js` 17/17 local + 17/17 Docker; browser: all JS/CSS from the CDN origin | **Verified (local CDN edge)**; no commercial CDN |
 | R15 | Bundle < 200 KB, TTI < 1.5 s | route code-splitting, lean shell, budget gate | 170 KB Brotli; localhost warm DOM-interactive 42 ms | **Verified** (no real-network TTI) |
-| R16 | Load balancing | `cluster.js`; **NGINX 1.28 in front of 3 replicas** (`infra/nginx.local.conf`, `start-lb-demo.ps1`); per-replica stats (`plugins/traffic.js`, admin Traffic tab) | 10,000-user simulation: 8,250 / 8,402 / 8,213 requests per replica (§19) | **Verified (local NGINX)**; production `infra/nginx.conf` still unverified |
+| R16 | Load balancing | `cluster.js`; **NGINX 1.28 in front of 3 replicas** (`infra/nginx.local.conf`, `start-lb-demo.ps1`); per-replica stats (`plugins/traffic.js`, admin Traffic tab) | 10,000-user simulation: 8,250 / 8,402 / 8,213 requests per replica (§19) | **Verified (local NGINX and the Docker `web` container, whose config derives from `infra/nginx.conf`)** |
 | R17 | Auth & authorization | bcrypt + JWT, `requireAdmin`, ownership checks | auth.test, orders.test 404/403 | **Verified** |
 | R18 | Admin deals + consistency | `routes/admin.js`, `AdminPage.jsx` | deals.test admin; browser dashboard | **Verified** |
 | R19 | Validation + central errors | JSON schemas (`schemas/common.js`), `plugins/errors.js` | auth.test bad JSON/validation | **Verified** |
@@ -162,7 +162,7 @@ E:\goMl
 ├─ package.json              npm workspaces + root scripts
 ├─ CLAUDE.md                 this file
 ├─ .claude/launch.json       browser-pane dev server config ("web" = Vite)
-├─ infra/nginx.conf          production reference LB/edge config (unverified)
+├─ infra/nginx.conf          production reference LB/edge config
 ├─ infra/nginx.local.conf    local NGINX demo: :8088 → api-1..3 (least_conn, keepalive, micro-cache, limits)
 ├─ infra/start-lb-demo.ps1   starts 3 API replicas + 2 workers + NGINX; stop-lb-demo.ps1 stops them
 ├─ backend/
@@ -354,7 +354,7 @@ Production-like single origin: `npm run build`, then in `backend/`: `SERVE_FRONT
 Managed MongoDB replica set and Redis/Valkey (auth + TLS, AOF everysec, replica). Upload `frontend/dist` (incl. `.br`) to a CDN with `/assets/*` immutable and `index.html` no-cache. Run N API containers (`NODE_ENV=production`, `TRUST_PROXY=<LB CIDR>`) behind NGINX/ALB, ≥ 2 workers. Secrets from a secret manager. Pre-create deals so Redis is primed; warm the CDN.
 
 ## 15. Progress
-Done & verified: R1–R31 (R16 NGINX half and real-network TTI unverified). Known limitations: simulated payments; no email notifications; no reviews/wishlist; product images are illustrations; admin can't edit catalog/stock in the UI (seed/script only). Next: see §18.
+Done & verified: R1–R32 (real-network TTI and a commercial CDN not measured/deployed). Known limitations: simulated payments; no email notifications; product images are illustrations; coupons, reviews, wishlist, returns, invoices, waiting room and the catalog/stock editor are API-only (no UI screens). Next: see §18.
 
 ## 16. Study Guide
 Trace a purchase: `ProductPage` (Add to cart) → `cart.jsx` → `CartPage` (`POST /cart/quote`) → `CheckoutPage` → `POST /api/orders` (`routes/orders.js` → `orderService.createCartOrder` → Mongo txn) → `POST /orders/:id/pay` (`payOrder` → `paymentService.charge` → conditional status update) → `OrderPage`.
