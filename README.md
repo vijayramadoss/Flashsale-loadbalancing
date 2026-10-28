@@ -4,6 +4,34 @@ A phone store with a high-concurrency **flash-sale** path: 500 units go on sale 
 
 **Stack:** React 19 + Astryx UI · Node 24 + Fastify 5 · MongoDB 8 (replica set) · Redis (Lua + Streams) · NGINX · Docker
 
+## How to run
+
+Needs **Docker Desktop** (running) and **Node 24**. Open a terminal in the project folder, then run these in order:
+
+```bash
+npm run setup
+```
+```bash
+docker compose up -d --build
+```
+```bash
+docker compose run --rm seed
+```
+```bash
+npm install
+```
+```bash
+node --env-file=backend/.env backend/scripts/smoke-test.js --base=http://localhost:8080 --metrics=skip
+```
+```bash
+node backend/scripts/cdn-check.js --site=http://localhost:8080
+```
+
+- `npm run setup` creates the `.env` files with random secrets and prints the admin login (`admin@flashsale.test` + a generated password).
+- Open the store at **http://localhost:8080**. The flash deal goes live about 2 minutes after the seed step. Admin screens: `/admin`.
+- Expected: smoke test **32/32 checks passed**, CDN check **ALL CDN CHECKS PASSED**.
+- If port 8080 is busy, change `WEB_PORT` in `.env`, rerun the second command, and use that port in the URLs.
+
 ## How it works
 
 ```
@@ -35,17 +63,9 @@ Browser ──▶ CDN edge (JS/CSS)
 
 The rest is a complete store around it: catalog, cart, checkout, payments (simulated gateway with signed webhooks), orders, admin.
 
-## Run it
+## Run without Docker
 
-**Docker (everything, one command set):**
-```bash
-npm run setup                    # creates .env files with random secrets (prints the admin login)
-docker compose up -d --build
-docker compose run --rm seed
-```
-Store `http://localhost:8080` · CDN `:8081` · Grafana `:3000`
-
-**Without Docker:** needs Node 24, MongoDB as a replica set, Redis. 
+Needs Node 24, MongoDB as a replica set, and Redis.
 ```bash
 npm install && npm run setup && npm run seed -- --fresh --starts-in-min=2
 npm run dev:api & npm run dev:worker & npm run dev:web
