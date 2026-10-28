@@ -45,7 +45,7 @@ docker compose run --rm seed
 ```
 Store `http://localhost:8080` · CDN `:8081` · Grafana `:3000`
 
-**Without Docker:** needs Node 24, MongoDB as a replica set, Redis. Steps are in `CLAUDE.md` §6.
+**Without Docker:** needs Node 24, MongoDB as a replica set, Redis. 
 ```bash
 npm install && npm run seed -- --fresh --starts-in-min=2
 npm run dev:api & npm run dev:worker & npm run dev:web
